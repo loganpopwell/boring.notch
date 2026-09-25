@@ -1,3 +1,16 @@
+## Stats tab fork
+
+This is Logan Popwell's fork of [TheBoredTeam/boring.notch](https://github.com/TheBoredTeam/boring.notch), based on upstream commit `69c43e2`. The original authors retain credit for Boring Notch; this fork adds a system Stats tab alongside Home and Shelf.
+
+- Live CPU, memory, GPU, storage, battery, and upload/download readings.
+- Expandable CPU and memory rankings grouped by app.
+- Battery capacity-health estimate and cycle count, where available.
+- Dark cards and compact navigation matching the existing app.
+
+Per-app battery drain is not measured; battery details show CPU activity for context. The upstream updater is disabled to preserve these changes. This is a source fork, not an official upstream release. See [Stats implementation and build notes](LOCAL_STATS.md). The original GPL-3.0 license and third-party notices remain in place.
+
+---
+
 <h1 align="center">
   <br>
   <a href="http://theboring.name"><img src="https://framerusercontent.com/images/RFK4vs0kn8pRMuOO58JeyoemXA.png?scale-down-to=256" alt="Boring Notch" width="150"></a>

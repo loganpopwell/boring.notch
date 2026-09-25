@@ -10,6 +10,12 @@ import ApplicationServices
 import IOKit
 
 class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
+    private let statsQueue = DispatchQueue(label: "local.boringnotch.process-stats", qos: .utility)
+    private let statsReader = ProcessStatsReader()
+    @objc func readProcessStats(with reply: @escaping (Data?) -> Void) {
+        statsQueue.async { [self] in reply(try? JSONEncoder().encode(statsReader.sample())) }
+    }
+
     private weak var connection: NSXPCConnection?
 
     private let lunarStateQueue = DispatchQueue(label: "BoringNotchXPCHelper.lunar.state")
