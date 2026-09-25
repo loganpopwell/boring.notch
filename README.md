@@ -1,16 +1,28 @@
-## Stats tab fork
+# My Boring Notch fork
 
-This is Logan Popwell's fork of [TheBoredTeam/boring.notch](https://github.com/TheBoredTeam/boring.notch), based on upstream commit `69c43e2`. The original authors retain credit for Boring Notch; this fork adds Stats and Tokens tabs alongside Home and Shelf.
+I liked Boring Notch's calendar, but I also wanted to check my system stats and Codex usage without adding more stuff to the menu bar. So I added two tabs next to the file drop: **Stats** and **Tokens**.
 
-- Live CPU, memory, GPU, storage, battery, and upload/download readings.
-- Expandable CPU and memory rankings grouped by app.
-- Battery capacity-health estimate and cycle count, where available.
-- A Tokens tab with Today, This Month, Lifetime, and monthly history from AI Token Meter.
-- Dark cards and compact navigation matching the existing app.
+This is a fork of [TheBoredTeam/boring.notch](https://github.com/TheBoredTeam/boring.notch). They built the original app. My changes started from commit `69c43e2`.
 
-Per-app battery drain is not measured; battery details show CPU activity for context. The upstream updater is disabled to preserve these changes. This is a source fork, not an official upstream release. See [Stats implementation and build notes](LOCAL_STATS.md). The original GPL-3.0 license and third-party notices remain in place.
+## What I added
+
+**Stats** shows CPU, RAM, GPU, storage, upload/download speeds, and battery health. You can click CPU or memory to see which apps are using the most. Battery also shows the cycle count. The app list there shows CPU activity, so it won't tell you exactly how much battery each app used.
+
+**Tokens** shows today's usage, this month, lifetime local usage, and a monthly history. I wanted to see roughly what that usage would've cost at API token prices instead of through a Codex subscription. It uses [AI Token Meter](https://github.com/prefect12/codex-token-meter)'s local report, so you'll need that app installed and running to keep the numbers updated. The dollar amounts are estimates, and any tokens it can't price are marked.
+
+I kept both tabs close to the rest of the app's look. Home and the file drop are still there.
+
+## Running this version
+
+You'll need to build this fork to get the extra tabs. The original project's downloads below don't include them. [Build notes are here](LOCAL_STATS.md).
+
+I turned off the upstream updater so an update doesn't replace this version. Upstream changes need to be brought in and rebuilt manually for now.
+
+The original GPL-3.0 license and third-party credits still apply.
 
 ---
+
+## Original project README
 
 <h1 align="center">
   <br>
