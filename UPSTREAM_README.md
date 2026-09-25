@@ -118,7 +118,7 @@ brew install --cask TheBoredTeam/boring-notch/boring-notch
 - [x] Shelf functionality with AirDrop 📚
 - [x] Notch sizing customization, finetuning on different display sizes 🖥️
 - [x] System OSD replacements (volume, brightness, backlight) 🎚️💡⌨️
-- [ ] Bluetooth Live Activity (connect/disconnect for bluetooth devices) 
+- [ ] Bluetooth Live Activity (connect/disconnect for bluetooth devices)
 - [ ] Weather integration ⛅️
 - [ ] Customizable Layout options 🛠️
 - [ ] Lock Screen Widgets 🔒
@@ -186,7 +186,7 @@ We’re all about good vibes and awesome contributions! Read [CONTRIBUTING.md](C
 
 ## 🎉 Acknowledgments
 
-We would like to express our gratitude to the authors and maintainers of the open-source projects that made this possible. 
+We would like to express our gratitude to the authors and maintainers of the open-source projects that made this possible.
 
 ## Notable Projects
 - **[MediaRemoteAdapter](https://github.com/ungive/mediaremote-adapter)** –  An open-source project that allowed us to use the Now Playing source in macOS 15.4+
@@ -199,4 +199,3 @@ For a full list of licenses and attributions, please see the [Third-Party Licens
 
 - **SwiftUI**: For making us look like coding wizards.
 - **You**: For being awesome and checking out **boring.notch**!
-
