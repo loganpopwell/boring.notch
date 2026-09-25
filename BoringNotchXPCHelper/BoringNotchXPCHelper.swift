@@ -16,6 +16,11 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         statsQueue.async { [self] in reply(try? JSONEncoder().encode(statsReader.sample())) }
     }
 
+    private let tokenQueue = DispatchQueue(label: "local.boringnotch.token-usage", qos: .utility)
+    @objc func readTokenUsage(with reply: @escaping (Data?) -> Void) {
+        tokenQueue.async { reply(try? JSONEncoder().encode(TokenUsageReader().sample())) }
+    }
+
     private weak var connection: NSXPCConnection?
 
     private let lunarStateQueue = DispatchQueue(label: "BoringNotchXPCHelper.lunar.state")

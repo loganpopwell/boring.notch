@@ -22,6 +22,7 @@ enum NotchViews {
     case home
     case shelf
     case stats
+    case tokens
 }
 
 enum DownloadIndicatorStyle: String, Defaults.Serializable {

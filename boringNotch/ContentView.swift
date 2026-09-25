@@ -591,6 +591,8 @@ struct ContentView: View {
                                 horizontalMediaGestureFeedback: horizontalMediaGestureFeedback,
                                 isHoveringMusicArea: $isHoveringMusicArea
                             )
+                        case .tokens:
+                            TokenUsageView()
                         case .stats:
                             StatsView()
                         case .shelf:

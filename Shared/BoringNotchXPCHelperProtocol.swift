@@ -38,6 +38,7 @@ final class BNLunarBrightnessEvent: NSObject, NSSecureCoding {
 }
 
 @objc protocol BoringNotchXPCHelperProtocol {
+    func readTokenUsage(with reply: @escaping (Data?) -> Void)
     func readProcessStats(with reply: @escaping (Data?) -> Void)
     func isAccessibilityAuthorized(with reply: @escaping (Bool) -> Void)
     func requestAccessibilityAuthorization()

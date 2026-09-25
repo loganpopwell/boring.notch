@@ -21,3 +21,18 @@ The Sparkle updater is not started in this fork to prevent an upstream update re
 Signing must preserve the original app and XPC helper entitlements. Sign nested code first, then the helper with its original entitlements, then the main app with its original entitlements. Verify with `codesign --verify --deep --strict`. Do not replace a running app.
 
 Verification: Release build and standalone sampling tests passed, including Mach tick conversion against a busy single-thread process. Installed app UI verified CPU and RAM rankings, upload/download detail, battery health and cycles, expansion/back navigation, and calendar events after restoring the existing permission. Current SDK builds include the full-access Calendar and Reminders usage-description keys. Per-app CPU uses Mach timebase conversion and 100% represents one core.
+
+
+## Tokens tab
+
+Tab order is Home, Shelf, Stats, Tokens. Tokens reads the installed [AI Token Meter](https://github.com/prefect12/codex-token-meter) aggregate `machine-usage-history.json` through the existing XPC helper. This is an integration with its version 1 report schema, not a separate log scanner. Keep AI Token Meter running to refresh the underlying history; the tab reloads its report every 30 seconds while visible and includes an Open Meter button. A last-scan indicator turns orange after one hour. Missing or incompatible reports show an explicit unavailable state.
+
+Today and calendar-month boundaries follow the meter's recorded timezone. Lifetime means all retained local daily records, not guaranteed complete account history. Account lifetime is displayed separately when the meter has it. API-equivalent USD sums the meter's estimates without maintaining an independent price table. Unknown-model tokens reduce priced coverage; fully unpriced usage is labeled Unpriced. These are estimates, not subscription bills or savings. Cached input is already part of input, and reasoning output is not added again. Older source cache counts can exceed reported input; these are retained and flagged without changing token totals or the meter's cost estimates. Only aggregate counts and estimates cross into the notch; the integration does not read credentials, prompts, or raw conversations, and performs no network requests.
+
+Token-reader checks use synthetic fixtures, with optional local integration validation:
+
+```sh
+xcrun swiftc Shared/TokenUsageSnapshot.swift BoringNotchXPCHelper/TokenUsageReader.swift Tests/Tokens/main.swift -o /tmp/boring-token-check
+/tmp/boring-token-check
+/tmp/boring-token-check --live
+```
