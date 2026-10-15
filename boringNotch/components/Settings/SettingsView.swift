@@ -18,6 +18,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case shelf
     case mirror
     case battery
+    case ai
     case osd
     case notifications
     case shortcuts
@@ -40,6 +41,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .shelf: "Shelf"
         case .mirror: "Mirror"
         case .battery: "Battery"
+        case .ai: "AI"
         case .osd: "OSD"
         case .notifications: "Notifications"
         case .shortcuts: "Shortcuts"
@@ -57,6 +59,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .shelf: .system("tray.and.arrow.down")
         case .mirror: .system("video")
         case .battery: .system("battery.100.bolt")
+        case .ai: .system("gauge.with.dots.needle.33percent")
         case .osd: .system("dial.medium.fill")
         case .notifications: .system("bell.badge")
         case .shortcuts: .system("keyboard")
@@ -107,6 +110,8 @@ struct SettingsView: View {
                     OSDSettings()
                 case .battery:
                     BatterySettingsView()
+                case .ai:
+                    AISettingsView()
                 case .shelf:
                     ShelfSettingsView()
                 case .mirror:

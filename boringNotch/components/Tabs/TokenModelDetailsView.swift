@@ -32,7 +32,8 @@ struct TokenModelList: View {
                         HStack(spacing: 5) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(model.name).fontWeight(.medium).lineLimit(1)
-                                Text((model.provider == "claude" ? "Claude Code" : "Codex") + (model.hasProxy ? " · proxy price" : ""))
+                                Text(NotchTokenModel.vendorTitle(model.vendor) + " · via " + (model.provider == "claude" ? "Claude Code" : "Codex")
+                                     + (model.hasProxy ? " · " + (model.rate?.source.hasPrefix("Alias") == true ? "alias price" : "proxy price") : ""))
                                     .font(.system(size: 8)).foregroundStyle(model.hasProxy ? .orange : .secondary)
                             }
                             Spacer(minLength: 3)

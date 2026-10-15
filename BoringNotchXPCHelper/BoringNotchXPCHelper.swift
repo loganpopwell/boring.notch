@@ -21,6 +21,14 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         tokenQueue.async { reply(try? JSONEncoder().encode(TokenUsageReader().sample())) }
     }
 
+    private let aiQueue = DispatchQueue(label: "local.boringnotch.ai-status", qos: .utility)
+    @objc func readAIStatus(_ detailed: Bool, with reply: @escaping (Data?) -> Void) {
+        aiQueue.async { reply(try? JSONEncoder().encode(AIStatusReader.shared.sample(detailed: detailed))) }
+    }
+    @objc func restartAIProxy(with reply: @escaping (Bool) -> Void) {
+        aiQueue.async { reply(AIStatusReader.shared.restartProxy()) }
+    }
+
     private weak var connection: NSXPCConnection?
 
     private let lunarStateQueue = DispatchQueue(label: "BoringNotchXPCHelper.lunar.state")

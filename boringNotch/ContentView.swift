@@ -22,6 +22,7 @@ struct ContentView: View {
     @ObservedObject var brightnessManager = BrightnessManager.shared
     @ObservedObject var volumeManager = VolumeManager.shared
     @ObservedObject var notificationManager = SystemNotificationManager.shared
+    @ObservedObject var aiStatus = AIStatusModel.shared
     /// Which entry of the closed-notch activity stack is on top.
     @State private var activityIndex: Int = 0
     @State private var hoverTask: Task<Void, Never>?
@@ -38,6 +39,7 @@ struct ContentView: View {
     @Namespace var albumArtNamespace
 
     @Default(.showNotHumanFace) var showNotHumanFace
+    @Default(.showAIQuotaRing) var showAIQuotaRing
 
     // Use standardized animations from StandardAnimations enum
     private let animationSpring = StandardAnimations.interactive
@@ -152,10 +154,23 @@ struct ContentView: View {
         case hello
         case nowPlayingFallback
         case batteryStatus
+        case aiAlert
         case osd(SneakContentType)
         case activities([LiveActivityItem])
+        case aiRing
         case face
         case idle
+    }
+
+    /// An AI alert takes the closed notch briefly, like the battery banner.
+    private var showsAIAlert: Bool {
+        aiStatus.alert != nil && vm.notchState == .closed && !vm.hideOnClosed && !isNotchHeightZero
+    }
+
+    /// The quota ring replaces the idle face on the right wing; music and notifications still take priority.
+    private var showsAIRing: Bool {
+        showAIQuotaRing && aiStatus.status?.ringAccount != nil && vm.notchState == .closed && !vm.hideOnClosed
+            && !coordinator.expandingView.show && liveActivities.isEmpty && !coordinator.shouldShowSneakPeek(on: vm.screenUUID)
     }
 
     private var closedNotchContent: ClosedNotchContent {
@@ -166,12 +181,14 @@ struct ContentView: View {
            Defaults[.showPowerStatusNotifications] {
             return .batteryStatus
         }
+        if showsAIAlert { return .aiAlert }
         if coordinator.shouldShowSneakPeek(on: vm.screenUUID) {
             return .osd(coordinator.sneakPeekState(for: vm.screenUUID).type)
         }
         if !liveActivities.isEmpty, !vm.hideOnClosed {
             return .activities(liveActivities)
         }
+        if showsAIRing { return .aiRing }
         if !coordinator.expandingView.show,
            !musicManager.isPlaying,
            musicManager.isPlayerIdle,
@@ -190,6 +207,8 @@ struct ContentView: View {
         } else if coordinator.expandingView.type == .battery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.showPowerStatusNotifications] {
             chinWidth = 640
+        } else if showsAIAlert {
+            chinWidth = nowPlayingFallbackNoticeWidth
         } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
@@ -207,9 +226,9 @@ struct ContentView: View {
                     chinWidth += 2 * inlineMusicPeekLabelWidth
                 }
             }
-        } else if !coordinator.expandingView.show && vm.notchState == .closed
+        } else if showsAIRing || (!coordinator.expandingView.show && vm.notchState == .closed
             && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace]
-            && !vm.hideOnClosed {
+            && !vm.hideOnClosed) {
             chinWidth += (2 * max(0, displayClosedNotchHeight - 12) + 20)
         }
 
@@ -476,6 +495,9 @@ struct ContentView: View {
                             .frame(width: 76, alignment: .trailing)
                         }
                         .frame(height: displayClosedNotchHeight, alignment: .center)
+                        } else if showsAIAlert, let alert = aiStatus.alert {
+                            AIAlertBanner(alert: alert, width: nowPlayingFallbackNoticeWidth)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                         } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && Defaults[.inlineOSD] && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
                            InlineOSD(
                               type: coordinator.binding(for: vm.screenUUID).type,
@@ -496,6 +518,8 @@ struct ContentView: View {
                                       .frame(alignment: .center)
                               }
                           }
+                      } else if showsAIRing, let status = aiStatus.status {
+                          AIQuotaRingWing(status: status)
                       } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed {
                           BoringFaceAnimation()
                        } else if showsHeader {
@@ -658,6 +682,20 @@ struct ContentView: View {
                 .announcement: announcement,
                 .priority: NSAccessibilityPriorityLevel.high.rawValue
             ]
+        )
+    }
+
+    @ViewBuilder
+    func AIQuotaRingWing(status: NotchAIStatus) -> some View {
+        HStack {
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width + 20)
+            AIQuotaRing(status: status, size: max(12, min(22, displayClosedNotchHeight - 12)))
+                .frame(width: max(0, displayClosedNotchHeight - 12))
+        }.frame(
+            height: displayClosedNotchHeight,
+            alignment: .center
         )
     }
 

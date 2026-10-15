@@ -73,7 +73,7 @@ final class TokenPricingCatalog: @unchecked Sendable {
         let catalog = try JSONDecoder().decode(Catalog.self, from: data)
         guard catalog.data.count <= 10000 else { throw TokenUsageReader.InvalidHistory.invalid }
         var rates: [String: NotchTokenRate] = [:]
-        for model in catalog.data where model.id.hasPrefix("openai/") || model.id.hasPrefix("anthropic/") {
+        for model in catalog.data where model.id.contains("/") && model.id.count <= 200 {
             guard !model.id.contains(":"), let input = model.pricing["prompt"]?.value,
                   let output = model.pricing["completion"]?.value else { continue }
             let rate = NotchTokenRate(modelID: model.id, input: input * 1_000_000,
@@ -88,21 +88,80 @@ final class TokenPricingCatalog: @unchecked Sendable {
         return rates
     }
 
-    static func resolve(_ name: String, provider: String, rates: [String: NotchTokenRate]) -> NotchTokenRate? {
+    /// The company that makes a model, inferred from its name. Independent of which tool sent the request,
+    /// because a local proxy can route Claude Code to GPT models and the reverse.
+    static func vendor(for name: String) -> String {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let prefix = provider == "claude" ? "anthropic/" : "openai/"
-        let aliases = ["claude-opus-5-5": "claude-opus-5.5", "claude-sonnet-5-5": "claude-sonnet-5.5",
-                       "claude-opus-4-6": "claude-opus-4.6", "claude-sonnet-4-6": "claude-sonnet-4.6",
-                       "claude-sonnet-4-5": "claude-sonnet-4.5", "claude-haiku-4-5": "claude-haiku-4.5"]
-        if let exact = rates[name] ?? rates[prefix + name] { return exact }
-        // Only explicit aliases are accepted. Similar-looking future models are never silently matched.
-        if let alias = aliases[name], let rate = rates[prefix + alias] { return rate }
-        if name == "gpt-5.3-codex-spark", var proxy = rates["openai/gpt-5.3-codex"] {
+        if let slash = name.firstIndex(of: "/") { return vendorAlias[String(name[..<slash])] ?? String(name[..<slash]) }
+        let base = name.hasPrefix("models/") ? String(name.dropFirst(7)) : name
+        for (prefix, vendor) in vendorPrefixes where base.hasPrefix(prefix) { return vendor }
+        if base.range(of: #"^o\d"#, options: .regularExpression) != nil { return "openai" }
+        return "unknown"
+    }
+    private static let vendorPrefixes: [(String, String)] = [
+        ("claude", "anthropic"), ("opus", "anthropic"), ("sonnet", "anthropic"), ("haiku", "anthropic"), ("fable", "anthropic"),
+        ("gpt", "openai"), ("codex", "openai"), ("chatgpt", "openai"), ("gemini", "google"), ("gemma", "google"),
+        ("grok", "x-ai"), ("glm", "z-ai"), ("qwen", "qwen"), ("deepseek", "deepseek"), ("kimi", "moonshotai"),
+        ("mistral", "mistralai"), ("devstral", "mistralai"), ("llama", "meta-llama")]
+    private static let vendorAlias = ["anthropic": "anthropic", "openai": "openai", "google": "google", "gemini": "google",
+                                      "claude": "anthropic", "codex": "openai", "x-ai": "x-ai", "xai": "x-ai"]
+
+    /// Canonical catalog spellings for names as tools and proxies log them. Every rewrite is deterministic;
+    /// nothing guesses a successor model.
+    static func candidates(_ raw: String) -> [String] {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let slash = name.lastIndex(of: "/") { name = String(name[name.index(after: slash)...]) }
+        // Context and routing annotations such as "[1m]" or "(high)" do not change the model's rate.
+        name = name.replacingOccurrences(of: #"\s*[\[(][^\])]*[\])]\s*$"#, with: "", options: .regularExpression)
+        var result = [name]
+        func add(_ value: String) { if !value.isEmpty, !result.contains(value) { result.append(value) } }
+        // Dated snapshots share their family's list price: claude-sonnet-4-5-20250929.
+        let undated = name.replacingOccurrences(of: #"-20\d{6}$"#, with: "", options: .regularExpression)
+        add(undated)
+        // Thinking and reasoning-effort suffixes are request options, billed at the base model's rate.
+        let effort = undated.replacingOccurrences(of: #"-(thinking|minimal|low|medium|high|xhigh|max|fast)$"#, with: "", options: .regularExpression)
+        add(effort)
+        for value in [name, undated, effort] {
+            // Anthropic API ids use dashes where the catalog uses a dot: claude-opus-5-5 -> claude-opus-5.5.
+            add(value.replacingOccurrences(of: #"^(claude-[a-z]+-\d+)-(\d)$"#, with: "$1.$2", options: .regularExpression))
+            add(value.replacingOccurrences(of: #"^claude-(\d+)-(\d)-([a-z]+)$"#, with: "claude-$3-$1.$2", options: .regularExpression))
+        }
+        return result
+    }
+
+    static func resolve(_ name: String, provider: String, rates: [String: NotchTokenRate]) -> NotchTokenRate? {
+        let raw = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let exact = rates[raw] { return exact }
+        var vendor = vendor(for: raw)
+        if vendor == "unknown" { vendor = provider == "claude" ? "anthropic" : "openai" }
+        for candidate in candidates(raw) {
+            if let rate = rates[vendor + "/" + candidate] ?? rates[candidate] { return rate }
+        }
+        let base = candidates(raw).last ?? raw
+        if base == "gpt-5.3-codex-spark", var proxy = rates["openai/gpt-5.3-codex"] {
             proxy.proxy = true
             proxy.source = "Proxy: GPT-5.3 Codex (Spark has no published rate)"
             return proxy
         }
+        // Claude Code can log a bare family alias. It resolves to that family's newest model, so price it
+        // at the newest catalog entry and label the substitution.
+        if ["opus", "sonnet", "haiku", "fable"].contains(base), var alias = newest(family: base, rates: rates) {
+            alias.proxy = true
+            alias.source = "Alias: \(base) priced as \(alias.modelID.replacingOccurrences(of: "anthropic/", with: ""))"
+            return alias
+        }
         return nil
+    }
+
+    private static func newest(family: String, rates: [String: NotchTokenRate]) -> NotchTokenRate? {
+        let pattern = "^anthropic/claude-" + family + #"-(\d+)(?:\.(\d+))?$"#
+        let regex = try? NSRegularExpression(pattern: pattern)
+        return rates.compactMap { key, rate -> ((Int, Int), NotchTokenRate)? in
+            guard let regex, let match = regex.firstMatch(in: key, range: NSRange(key.startIndex..., in: key)),
+                  let major = Range(match.range(at: 1), in: key).flatMap({ Int(key[$0]) }) else { return nil }
+            let minor = Range(match.range(at: 2), in: key).flatMap { Int(key[$0]) } ?? 0
+            return ((major, minor), rate)
+        }.max { $0.0 < $1.0 }?.1
     }
 
     // Verified public catalog snapshot, 2026-10-01 UTC. Used offline until the next daily refresh.

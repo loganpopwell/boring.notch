@@ -4,16 +4,17 @@ import SwiftUI
     @Published var snapshot: NotchTokenSnapshot?
     @Published var failure: String?
     @Published var loading = false
+    @Published var lateRefresh = false
     private var connection: NSXPCConnection?
     private var requestID = UUID()
     private var lastMeterLaunch = Date.distantPast
 
-    func refresh() {
+    func refresh(includeCodex: Bool = true) {
         guard !loading else { return }
         // The report writer is a separate menu-bar app. Relaunch it quietly if it has stopped.
-        if !NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex-token-meter").isEmpty {
+        if includeCodex, !NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex-token-meter").isEmpty {
             lastMeterLaunch = .distantPast
-        } else if Date().timeIntervalSince(lastMeterLaunch) > 60,
+        } else if includeCodex, Date().timeIntervalSince(lastMeterLaunch) > 60,
                   let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "local.codex-token-meter") {
             lastMeterLaunch = Date()
             let configuration = NSWorkspace.OpenConfiguration()
@@ -32,9 +33,12 @@ import SwiftUI
                 guard let self, self.requestID == id, self.loading else { return }
                 self.loading = false
                 if let data, let next = try? JSONDecoder().decode(NotchTokenSnapshot.self, from: data) {
-                    self.snapshot = next; self.failure = nil
+                    self.snapshot = next; self.failure = nil; self.lateRefresh = false
+                } else if self.snapshot != nil {
+                    // Keep showing the last good reading; the footer says the refresh is late.
+                    self.lateRefresh = true
                 } else {
-                    self.failure = "Could not read the meter. Try refreshing."
+                    self.failure = "Could not read local usage. Try refreshing."
                     self.connection?.invalidate(); self.connection = nil
                 }
             }
@@ -42,7 +46,8 @@ import SwiftUI
         if let proxy = connection?.remoteObjectProxyWithErrorHandler({ _ in finish(nil) }) as? BoringNotchXPCHelperProtocol {
             proxy.readTokenUsage(with: finish)
         } else { finish(nil) }
-        Task { try? await Task.sleep(for: .seconds(5)); if requestID == id && loading { finish(nil) } }
+        // The first scan of a large Claude history can take several seconds; later scans read only new lines.
+        Task { try? await Task.sleep(for: .seconds(snapshot == nil ? 45 : 20)); if requestID == id && loading { finish(nil) } }
     }
     deinit { connection?.invalidate() }
 }
@@ -55,9 +60,19 @@ struct TokenUsageView: View {
     @State private var panel = "overview"
     @State private var selectedModelID: String?
     @State private var provider = "all"
-    private var source: NotchTokenSource? { model.snapshot?.source(provider) }
+    private var source: NotchTokenSource? {
+        guard let snapshot = model.snapshot else { return nil }
+        if provider.hasPrefix("vendor:") { return snapshot.source("all").filtered(vendor: String(provider.dropFirst(7))) }
+        return snapshot.source(provider)
+    }
+    private var vendorFilters: [(String, String)] {
+        (model.snapshot?.source("all").vendors ?? []).map { ("vendor:" + $0, NotchTokenModel.vendorTitle($0)) }
+    }
     private var failure: String? { model.failure ?? source?.error }
-    private var providerTitle: String { provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Codex + Claude" }
+    private var providerTitle: String {
+        if provider.hasPrefix("vendor:") { return NotchTokenModel.vendorTitle(String(provider.dropFirst(7))) + " models" }
+        return provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Codex + Claude"
+    }
     private var expanded: Bool { history || panel != "overview" }
     private var chosenModel: NotchTokenModel? { period?.models.first { $0.id == selectedModelID } }
     private var period: NotchTokenPeriod? { source?.periods.first { $0.id == selected } }
@@ -80,14 +95,21 @@ struct TokenUsageView: View {
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 6) {
-                ForEach([("all", "All"), ("codex", "Codex"), ("claude", "Claude Code")], id: \.0) { id, title in
+                ForEach([("all", "All"), ("codex", "Codex"), ("claude", "Claude Code")] + vendorFilters, id: \.0) { id, title in
+                    if id == vendorFilters.first?.0 { Divider().frame(height: 10) }
                     Button { provider = id; selectedModelID = nil; if panel == "detail" { panel = "models" } } label: {
                         Text(title).padding(.horizontal, 9).padding(.vertical, 3)
-                            .background(Capsule().fill(provider == id ? Color.white.opacity(0.12) : .clear))
-                    }.buttonStyle(.plain).foregroundStyle(provider == id ? .primary : .secondary)
+                            .background(Capsule().fill(provider == id && panel != "limits" ? Color.white.opacity(0.12) : .clear))
+                    }.buttonStyle(.plain).foregroundStyle(provider == id && panel != "limits" ? .primary : .secondary)
+                        .help(id.hasPrefix("vendor:") ? "Usage of this company's models from every tool" : "Usage logged by this tool")
                 }
                 Spacer()
-                Text("Local token usage").foregroundStyle(.secondary)
+                Button { panel = panel == "limits" ? "overview" : "limits"; history = false; selectedModelID = nil } label: {
+                    Label("Limits", systemImage: "gauge.with.dots.needle.33percent")
+                        .padding(.horizontal, 9).padding(.vertical, 3)
+                        .background(Capsule().fill(panel == "limits" ? Color.white.opacity(0.12) : .clear))
+                }.buttonStyle(.plain).foregroundStyle(panel == "limits" ? .cyan : .secondary)
+                    .help("Subscription limits for each Claude account in CLI Proxy, and Codex")
             }.font(.system(size: 10))
             HStack(spacing: 7) {
                 if history {
@@ -108,15 +130,17 @@ struct TokenUsageView: View {
                         .foregroundStyle(panel == "pricing" ? .cyan : .secondary)
                     Button { history = true; panel = "overview" } label: { Image(systemName: "calendar") }.buttonStyle(.plain).help("Monthly history").accessibilityLabel("Monthly token history")
                 }
-                Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                Button { model.refresh(includeCodex: provider != "claude") } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).disabled(model.loading).help("Refresh Codex and Claude usage").accessibilityLabel("Refresh token usage")
                 Button(action: openMeter) { Image(systemName: "arrow.up.forward.app") }
                     .buttonStyle(.plain).help("Open AI Token Meter to update history").accessibilityLabel("Open AI Token Meter")
             }.font(.system(size: 11))
-            if let failure = failure {
+            if panel == "limits" {
+                AILimitsPanel()
+            } else if let failure = failure {
                 VStack(spacing: 8) {
                     Text(failure).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    Button("Open AI Token Meter", action: openMeter).buttonStyle(.plain)
+                    if provider != "claude" { Button("Open AI Token Meter", action: openMeter).buttonStyle(.plain) }
                 }.font(.system(size: 12)).frame(maxWidth: .infinity, minHeight: history ? 198 : 70)
             } else if history, let snapshot = source {
                 ScrollView {
@@ -174,7 +198,7 @@ struct TokenUsageView: View {
                     Text(provider == "claude" ? "ago · Local Claude Code" : provider == "codex" ? "ago · AI Token Meter" : "ago · Local sources")
                 } else { Text("Local history · AI Token Meter") }
                 Spacer(minLength: 0)
-                Text(source?.notice ?? (history ? "USD estimate · partial pricing marked" : (source?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Cached tokens are part of input")))
+                Text(model.lateRefresh ? "Refresh is taking longer · showing last reading" : source?.notice ?? (history ? "USD estimate · partial pricing marked" : (source?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Cached tokens are part of input")))
             }.font(.system(size: 9)).foregroundStyle(stale || source?.notice != nil ? .orange : .secondary).lineLimit(1)
         }
         .padding(.horizontal, 12).frame(width: 600)
@@ -185,7 +209,7 @@ struct TokenUsageView: View {
         .task {
             withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = expanded ? 320 : max(openNotchSize.height, 210) }
             while !Task.isCancelled {
-                model.refresh()
+                model.refresh(includeCodex: provider != "claude")
                 do { try await Task.sleep(for: .seconds(30)) } catch { break }
             }
         }

@@ -16,7 +16,7 @@ The interface follows Boring Notch's existing dark styling, with compact summary
 
 The Tokens tab uses [AI Token Meter](https://github.com/prefect12/codex-token-meter) for Codex aggregates and a usage-only local reader for Claude Code to display:
 
-- All, Codex, and Claude Code source filters.
+- All, Codex, and Claude Code source filters, plus filters by model maker (Anthropic, OpenAI) across both tools.
 - Today, current calendar month, and retained lifetime local token usage.
 - Monthly history and estimated API-equivalent cost in USD for both providers.
 - Per-model token totals, usage percentages, estimated costs, and cost shares.
@@ -25,6 +25,14 @@ The Tokens tab uses [AI Token Meter](https://github.com/prefect12/codex-token-me
 - Pricing coverage, data freshness, and a separate account-lifetime total when available.
 
 AI Token Meter must be installed to refresh Codex source data. Opening Tokens starts the meter in the background if it has stopped. The helper checks both local sources every 30 seconds while visible. Claude Code usage is decoded directly from assistant-message usage metadata under `.claude/projects`, including subagents. It decodes only model, timestamp, message identifiers, and numeric usage, ignores content, and deduplicates streamed messages and repeated files. Unchanged files use an in-memory metadata cache. No credentials or conversation content are decoded, retained, or transmitted. Usage stays local. The helper fetches only the public OpenRouter model-price catalog, without sending usage, model selections, prompts, or credentials. Prices refresh daily; a verified bundled price snapshot and a local price cache support offline use.
+
+### Subscription limits
+
+The Tokens tab's **Limits** view lists each Claude account pooled by a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) gateway, with 5-hour and weekly usage, reset times, routing priority, cooldowns, and which account answered last or would answer next, plus native Codex limits from its session files. A **Restart** button restarts the proxy's LaunchAgent.
+
+An optional ring in the closed notch shows the tightest limit of the account currently in use, and short alerts report when the proxy stops responding, an account hits a limit, or requests switch accounts. Both can be turned off in Settings › AI or from the Limits view.
+
+The proxy integration reads the management key from `~/.config/cliproxyapi/management-key` and connects only to `127.0.0.1`. Full account limits are requested only while the Limits view is open.
 
 ## Interpreting the readings
 

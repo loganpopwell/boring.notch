@@ -59,7 +59,8 @@ struct NotchTokenSnapshot: Codable {
         return NotchTokenSource(periods: periods, months: months.values.sorted { $0.id > $1.id },
             sampledAt: available.map(\.sampledAt).min() ?? .distantPast,
             cacheCountsInconsistent: available.contains { $0.cacheCountsInconsistent },
-            notice: available.count < 2 ? "Partial total: \(codex.error == nil ? "Claude Code" : "Codex") unavailable" : available.compactMap(\.notice).first)
+            notice: available.count < 2 ? "Partial total: \(codex.error == nil ? "Claude Code" : "Codex") unavailable"
+                : available.compactMap(\.notice).isEmpty ? nil : available.compactMap(\.notice).joined(separator: " · "))
     }
 }
 
@@ -70,6 +71,30 @@ struct NotchTokenSource: Codable {
     var cacheCountsInconsistent = false
     var error: String?
     var notice: String?
+
+    /// Only usage from one model maker, with totals rebuilt from the matching model rows.
+    func filtered(vendor: String) -> NotchTokenSource {
+        func keep(_ period: NotchTokenPeriod) -> NotchTokenPeriod {
+            var value = NotchTokenPeriod(id: period.id, title: period.title)
+            for model in period.models where model.vendor == vendor {
+                value.tokens += model.tokens; value.input += model.input; value.cached += model.cached
+                value.output += model.output; value.estimatedUSD += model.estimatedUSD; value.pricedTokens += model.pricedTokens
+                value.models.append(model)
+            }
+            return value
+        }
+        var value = self
+        value.periods = periods.map(keep)
+        value.months = months.map(keep).filter { $0.tokens > 0 }
+        return value
+    }
+    var vendors: [String] {
+        let all = periods.first { $0.id == "lifetime" }?.models ?? periods.flatMap(\.models)
+        return Array(Set(all.filter { $0.tokens > 0 }.map(\.vendor))).sorted {
+            let order = ["anthropic", "openai"]
+            return (order.firstIndex(of: $0) ?? 9, $0) < (order.firstIndex(of: $1) ?? 9, $1)
+        }
+    }
 }
 
 // All prices are USD per one million tokens. These are standard API equivalents.
@@ -90,6 +115,8 @@ struct NotchTokenModel: Codable, Identifiable {
     var id: String { provider + ":" + name }
     var provider: String
     var name: String
+    /// Model maker inferred from the model name. `provider` is the tool that logged the usage.
+    var vendor = "unknown"
     var tokens: Int64 = 0
     var input: Int64 = 0
     var cached: Int64 = 0
@@ -110,6 +137,11 @@ struct NotchTokenModel: Codable, Identifiable {
     var billableWrite1h: Int64 { min(write1h, max(0, input - billableCached - billableWrite5m)) }
     var freshInput: Int64 { max(0, input - billableCached - billableWrite5m - billableWrite1h) }
     var hasProxy: Bool { rate?.proxy == true }
+    static func vendorTitle(_ vendor: String) -> String {
+        ["anthropic": "Anthropic", "openai": "OpenAI", "google": "Google", "x-ai": "xAI", "z-ai": "Z.ai", "qwen": "Qwen",
+         "deepseek": "DeepSeek", "moonshotai": "Moonshot", "mistralai": "Mistral", "meta-llama": "Meta"][vendor]
+            ?? (vendor == "unknown" ? "Other" : vendor.capitalized)
+    }
 
     mutating func price(using rate: NotchTokenRate?) {
         self.rate = rate

@@ -41,7 +41,8 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
                 total: fresh + read + parent + output, cacheCreationInput: parent - hour, cacheCreationInput1h: hour)
         }
     }
-    private struct CachedFile { let size: Int; let modified: Date; let events: [Event]; let partial: Bool }
+    // Session files are append-only, so a grown file is read from the end of its last complete line.
+    private struct CachedFile { let size: Int; let modified: Date; let identity: NSObject?; let offset: Int; let events: [Event]; let partial: Bool }
     private var cache: [URL: CachedFile] = [:]
     private let lock = NSLock()
     static func parse(_ data: Data) -> (events: [Event], partial: Bool) {
@@ -108,10 +109,31 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
         return .init(periods: value.periods, months: value.months, sampledAt: now,
             error: reportDays.isEmpty ? "No local Claude Code usage recorded yet." : nil)
     }
-    func sample(now: Date = Date(), timeZone: TimeZone, pricing: [String: NotchTokenRate]) -> NotchTokenSource {
+    /// Parses complete lines from `offset` in bounded chunks, so long sessions never load whole into memory.
+    private static func scan(_ file: URL, from offset: Int, to size: Int) throws -> (events: [Event], partial: Bool, end: Int) {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        var position = offset, carry = Data(), events: [Event] = [], partial = false
+        while position < size {
+            guard let chunk = try handle.read(upToCount: min(32_000_000, size - position)), !chunk.isEmpty else { break }
+            position += chunk.count
+            carry.append(chunk)
+            guard let last = carry.lastIndex(of: 10) else {
+                guard carry.count <= 64_000_000 else { throw TokenUsageReader.InvalidHistory.invalid }
+                continue
+            }
+            let result = parse(carry.prefix(through: last))
+            events += result.events; partial = partial || result.partial
+            carry = Data(carry.suffix(from: last + 1))
+        }
+        // Leave an unfinished final record for the next read instead of counting part of it.
+        return (events, partial, position - carry.count)
+    }
+    func sample(now: Date = Date(), timeZone: TimeZone, pricing: [String: NotchTokenRate], root: URL? = nil) -> NotchTokenSource {
         lock.lock(); defer { lock.unlock() }
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isSymbolicLinkKey, .isRegularFileKey]
+        let root = root ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isSymbolicLinkKey, .isRegularFileKey, .fileResourceIdentifierKey]
         var partial = false
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles], errorHandler: { _, _ in partial = true; return true }) else {
@@ -124,12 +146,17 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
                 if info.isSymbolicLink == true { enumerator.skipDescendants(); continue }
                 guard info.isRegularFile == true, file.pathExtension == "jsonl" else { continue }
                 let size = info.fileSize ?? 0, modified = info.contentModificationDate ?? .distantPast
+                let identity = info.fileResourceIdentifier as? NSObject
+                guard size <= 4_000_000_000 else { partial = true; continue }
                 let entry: CachedFile
                 if let old = cache[file], old.size == size, old.modified == modified { entry = old }
-                else {
-                    guard size <= 250_000_000 else { partial = true; continue }
-                    let result = Self.parse(try Data(contentsOf: file, options: .mappedIfSafe))
-                    entry = .init(size: size, modified: modified, events: result.events, partial: result.partial)
+                else if let old = cache[file], size > old.size, old.identity != nil, old.identity == identity {
+                    let result = try Self.scan(file, from: old.offset, to: size)
+                    entry = .init(size: size, modified: modified, identity: identity, offset: result.end,
+                                  events: old.events + result.events, partial: old.partial || result.partial)
+                } else {
+                    let result = try Self.scan(file, from: 0, to: size)
+                    entry = .init(size: size, modified: modified, identity: identity, offset: result.end, events: result.events, partial: result.partial)
                 }
                 next[file] = entry; events.append(contentsOf: entry.events); partial = partial || entry.partial
             } catch { partial = true }

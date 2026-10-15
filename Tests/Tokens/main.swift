@@ -33,56 +33,19 @@ fixture["version"] = 1
 fixture["localCodexByDay"] = [String: Any]()
 let empty = try decode()
 assert(empty.error != nil, "Missing data is not zero usage")
-// The details cache uses Foundation reference-date timestamps, not Unix time.
-func claudeFixture(version: Int = 10, days: [[String: Any]]? = nil) throws -> Data {
-    try JSONSerialization.data(withJSONObject: ["version": version, "snapshot": ["claude": [
-        "scannedAt": now.timeIntervalSinceReferenceDate,
-        "byDay": days ?? [
-            ["day": "2026-08-31", "usage": ["input": 80, "cachedInput": 50, "output": 20, "total": 100]],
-            ["day": "2026-09-30", "usage": ["input": 180, "cachedInput": 100, "cacheCreationInput": 40, "output": 20, "total": 200]],
-            ["day": "2026-10-01", "usage": ["input": 900, "cachedInput": 0, "output": 100, "total": 1000]]
-        ]
-    ]]])
+let chicago = TimeZone(identifier: "America/Chicago")!
+func event(_ id: String, _ date: String, _ usage: TokenUsageReader.Usage, model: String = "claude-opus-5-5") -> ClaudeLocalUsageReader.Event {
+    .init(id: id, model: model, date: ISO8601DateFormatter().date(from: date)!, usage: usage)
 }
-let claude = try TokenUsageReader.decodeClaude(claudeFixture(), now: now, timeZone: TimeZone(identifier: "America/Chicago")!)
+let claude = try ClaudeLocalUsageReader.aggregate([
+    event("a", "2026-08-31T18:00:00Z", .init(input: 80, cachedInput: 50, output: 20, total: 100)),
+    event("b", "2026-09-30T18:00:00Z", .init(input: 180, cachedInput: 100, output: 20, total: 200, cacheCreationInput: 40)),
+    event("c", "2026-10-01T12:00:00Z", .init(input: 900, cachedInput: 0, output: 100, total: 1000))
+], now: now, timeZone: chicago, pricing: [:])
 assert(claude.periods[0].tokens == 200 && claude.periods[1].tokens == 200)
-assert(claude.periods[2].tokens == 300, "Ignore future calendar days and do not count cache creation twice")
+assert(claude.periods[2].tokens == 300, "Ignore future usage and do not count cache creation twice")
 assert(claude.periods[0].input == 180 && claude.periods[0].cached == 100)
 assert(claude.periods[2].pricedTokens == 0 && claude.periods[2].coverage == 0, "Never invent Claude pricing")
-assert(abs(claude.sampledAt.timeIntervalSince(now)) < 1)
-assert((try? TokenUsageReader.decodeClaude(claudeFixture(version: 99))) == nil)
-let duplicate: [String: Any] = ["day": "2026-09-30", "usage": ["input": 80, "cachedInput": 0, "output": 20, "total": 100]]
-assert((try? TokenUsageReader.decodeClaude(claudeFixture(days: [duplicate, duplicate]))) == nil)
-let invalid: [String: Any] = ["day": "2026-09-30", "usage": ["input": -1, "cachedInput": 0, "output": 20, "total": 100]]
-assert((try? TokenUsageReader.decodeClaude(claudeFixture(days: [invalid]))) == nil)
-let oldClaude = try JSONSerialization.jsonObject(with: claudeFixture()) as! [String: Any]
-var olderDetails = oldClaude
-var reports = olderDetails["snapshot"] as! [String: Any]
-var report = reports["claude"] as! [String: Any]
-report["scannedAt"] = now.addingTimeInterval(-3600).timeIntervalSinceReferenceDate
-reports["claude"] = report; olderDetails["snapshot"] = reports
-let recentCache = try JSONSerialization.data(withJSONObject: ["version": 6, "entries": [[
-    "quota": "claude", "windowHours": 24, "report": ["scannedAt": now.timeIntervalSinceReferenceDate, "byDay": [
-        ["day": "2026-09-29", "usage": ["input": 800, "cachedInput": 0, "output": 100, "total": 900]],
-        ["day": "2026-09-30", "usage": ["input": 380, "cachedInput": 200, "output": 20, "total": 400]]
-    ]]
-]]])
-let recentClaude = try TokenUsageReader.decodeClaude(JSONSerialization.data(withJSONObject: olderDetails), dashboard: recentCache,
-    now: now, timeZone: TimeZone(identifier: "America/Chicago")!)
-assert(recentClaude.periods[0].tokens == 400 && recentClaude.periods[2].tokens == 500,
-    "Replace the complete current day with fresher usage; exclude the rolling window's partial first day")
-assert(abs(recentClaude.sampledAt.timeIntervalSince(now)) < 1)
-let fallNow = ISO8601DateFormatter().date(from: "2026-11-02T05:30:00Z")! // 23:30 on a 25-hour Chicago day.
-let fallDay: [String: Any] = ["day": "2026-11-01", "usage": ["input": 180, "cachedInput": 0, "output": 20, "total": 200]]
-let fallDetails = try JSONSerialization.data(withJSONObject: ["version": 10, "snapshot": ["claude": [
-    "scannedAt": fallNow.addingTimeInterval(-3600).timeIntervalSinceReferenceDate, "byDay": [fallDay]
-]]])
-let fallDashboard = try JSONSerialization.data(withJSONObject: ["version": 6, "entries": [[
-    "quota": "claude", "windowHours": 24, "report": ["scannedAt": fallNow.timeIntervalSinceReferenceDate,
-        "byDay": [["day": "2026-11-01", "usage": ["input": 380, "cachedInput": 0, "output": 20, "total": 400]]]]
-]]])
-let fall = try TokenUsageReader.decodeClaude(fallDetails, dashboard: fallDashboard, now: fallNow, timeZone: TimeZone(identifier: "America/Chicago")!)
-assert(fall.periods[0].tokens == 200, "A 24-hour report cannot replace a current calendar day already longer than 24 hours")
 var combined = snapshot
 combined.claude = claude
 assert(combined.source("all").periods[2].tokens == 900)
@@ -141,8 +104,89 @@ assert(abs(directModel.estimatedUSD - 0.00408) < 0.00000001, "Fresh input, read,
 assert(direct.periods[0].pricedTokens == 760)
 assert(ClaudeLocalUsageReader.parse(Data("{bad}\n".utf8)).partial)
 assert(!ClaudeLocalUsageReader.parse(Data("{unfinished".utf8)).partial)
+// Proxied tools: the model name, not the logging tool, decides the maker and the price.
+assert(TokenPricingCatalog.vendor(for: "gpt-6.1-sol") == "openai" && TokenPricingCatalog.vendor(for: "claude-opus-5-5") == "anthropic")
+assert(TokenPricingCatalog.vendor(for: "openrouter/google/gemini-3-pro") == "openrouter" || TokenPricingCatalog.vendor(for: "gemini-3-pro") == "google")
+assert(TokenPricingCatalog.vendor(for: "o4-mini") == "openai" && TokenPricingCatalog.vendor(for: "<synthetic>") == "unknown")
+let seed = TokenPricingCatalog.seed
+assert(TokenPricingCatalog.resolve("gpt-6.1-sol", provider: "claude", rates: seed)?.modelID == "openai/gpt-6.1-sol", "GPT through Claude Code is priced as GPT")
+assert(TokenPricingCatalog.resolve("claude-opus-5-5[1m]", provider: "claude", rates: seed)?.modelID == "anthropic/claude-opus-5.5")
+assert(TokenPricingCatalog.resolve("anthropic/claude-sonnet-5-5", provider: "codex", rates: seed)?.modelID == "anthropic/claude-sonnet-5.5", "Claude through Codex is priced as Claude")
+assert(TokenPricingCatalog.resolve("gpt-6.1-sol-high", provider: "codex", rates: seed)?.modelID == "openai/gpt-6.1-sol")
+assert(TokenPricingCatalog.resolve("claude-sonnet-5-5-thinking", provider: "claude", rates: seed)?.modelID == "anthropic/claude-sonnet-5.5")
+assert(TokenPricingCatalog.resolve("gpt-5.4-mini", provider: "codex", rates: seed)?.modelID == "openai/gpt-5.4-mini", "Size names are not effort suffixes")
+let alias = TokenPricingCatalog.resolve("opus", provider: "claude", rates: seed)
+assert(alias?.modelID == "anthropic/claude-opus-5.5" && alias?.proxy == true, "Family aliases use the newest family rate, labeled")
+assert(TokenPricingCatalog.resolve("sonnet", provider: "claude", rates: seed)?.modelID == "anthropic/claude-sonnet-5.5")
+assert(TokenPricingCatalog.resolve("claude-opus-5-6", provider: "claude", rates: seed) == nil, "Never guess a successor model")
+let mixed = try ClaudeLocalUsageReader.aggregate([
+    event("m1", "2026-09-30T18:00:00Z", .init(input: 900, cachedInput: 0, output: 100, total: 1000)),
+    event("m2", "2026-09-30T18:01:00Z", .init(input: 450, cachedInput: 0, output: 50, total: 500), model: "gpt-6.1-sol")
+], now: now, timeZone: chicago, pricing: seed)
+let gptRow = mixed.periods[0].models.first { $0.name == "gpt-6.1-sol" }!
+assert(gptRow.provider == "claude" && gptRow.vendor == "openai" && gptRow.pricedTokens == 500)
+let openAIOnly = mixed.filtered(vendor: "openai")
+assert(openAIOnly.periods[0].tokens == 500 && openAIOnly.periods[0].models.count == 1 && openAIOnly.months.map(\.tokens) == [500])
+assert(abs(openAIOnly.periods[0].estimatedUSD - gptRow.estimatedUSD) < 0.0000001)
+assert(mixed.vendors == ["anthropic", "openai"])
+// Growing session files are read from the last complete line; an unfinished record waits for its newline.
+let folder = FileManager.default.temporaryDirectory.appendingPathComponent("boring-token-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: folder) }
+let sessionFile = folder.appendingPathComponent("session.jsonl")
+let line1 = #"{"type":"assistant","timestamp":"2026-09-30T18:00:00Z","message":{"id":"i1","model":"gpt-6.1-sol","usage":{"input_tokens":10,"output_tokens":5}}}"#
+let line2 = #"{"type":"assistant","timestamp":"2026-09-30T18:00:05Z","message":{"id":"i2","model":"claude-opus-5-5","usage":{"input_tokens":20,"output_tokens":5}}}"#
+try Data((line1 + "\n" + line2.prefix(40)).utf8).write(to: sessionFile)
+let reader = ClaudeLocalUsageReader()
+let first = reader.sample(now: now, timeZone: chicago, pricing: seed, root: folder)
+assert(first.periods[0].tokens == 15 && first.notice == nil, "An unfinished last record is neither counted nor partial")
+let handle = try FileHandle(forWritingTo: sessionFile); try handle.seekToEnd()
+try handle.write(contentsOf: Data((line2.dropFirst(40) + "\n").utf8)); try handle.close()
+let second = reader.sample(now: now, timeZone: chicago, pricing: seed, root: folder)
+assert(second.periods[0].tokens == 40 && second.periods[0].models.count == 2, "Appended records are read incrementally")
+try Data((line2 + "\n").utf8).write(to: sessionFile)
+assert(reader.sample(now: now, timeZone: chicago, pricing: seed, root: folder).periods[0].tokens == 25, "A replaced file is read again from the start")
+// Quota: proxy rate-limit headers, Anthropic usage replies, and native Codex session metadata.
+let quotaNow = Date(timeIntervalSince1970: 1_792_040_000)
+let signals = ["Anthropic-Ratelimit-Unified-5h-Utilization": "0.38", "Anthropic-Ratelimit-Unified-5h-Reset": "1792056600",
+               "Anthropic-Ratelimit-Unified-5h-Status": "allowed", "Anthropic-Ratelimit-Unified-7d-Utilization": "1.0",
+               "Anthropic-Ratelimit-Unified-7d-Reset": "1792050000", "Anthropic-Ratelimit-Unified-7d-Status": "rejected",
+               "Anthropic-Ratelimit-Unified-Fallback-Percentage": "0.5"]
+let fromSignals = AIStatusReader.signalWindows(signals, now: quotaNow)
+assert(fromSignals.map(\.id) == ["five_hour", "seven_day"] && abs(fromSignals[0].percent - 38) < 0.001 && !fromSignals[0].limited)
+assert(fromSignals[1].limited && fromSignals[1].percent == 100, "A rejected window is at its limit")
+assert(AIStatusReader.signalWindows(signals, now: Date(timeIntervalSince1970: 1_792_060_000)).allSatisfy { $0.percent == 0 && $0.resetsAt == nil },
+       "A window that already reset reads as empty")
+let usageReply = Data(#"{"five_hour":{"utilization":38.0,"resets_at":"2026-10-15T09:29:59.690227+00:00"},"seven_day":null,"limits":[{"kind":"session","group":"session","percent":38,"resets_at":"2026-10-15T09:29:59.690227+00:00"},{"kind":"weekly_scoped","group":"weekly","percent":25,"resets_at":"2026-10-21T22:00:00+00:00","scope":{"model":{"display_name":"Fable"}}}]}"#.utf8)
+let fromUsage = AIStatusReader.usageWindows(usageReply, now: quotaNow)!
+assert(fromUsage.map(\.title) == ["5-hour", "Weekly · Fable"] && fromUsage[1].percent == 25 && fromUsage[0].resetsAt != nil)
+let authFiles = Data(#"{"files":[{"auth_index":"a1","type":"claude","email":"one@example.com","priority":500,"status":"active","quota":{"observed_at":"2026-10-15T00:06:16.230138-05:00","signals":{"Anthropic-Ratelimit-Unified-5h-Utilization":"0.5","Anthropic-Ratelimit-Unified-5h-Reset":"1792056600"}},"recent_requests":[{"success":3,"failed":1}],"cooldowns":[]},{"auth_index":"a2","type":"claude","email":"two@example.com","priority":400,"disabled":true},{"auth_index":"a3","type":"claude","email":"three@example.com","priority":300,"unavailable":true,"cooldowns":[{"until":"x"}]},{"auth_index":"c1","type":"codex","id_token":{"chatgpt_account_id":"never-decoded"}}]}"#.utf8)
+let pooled = try AIStatusReader.accounts(from: authFiles, now: quotaNow)
+assert(pooled.map(\.id) == ["a1", "a2", "a3"] && pooled.map(\.label) == ["one", "two", "three"], "Only Claude logins, labeled without the domain")
+assert(pooled.map(\.state) == ["ok", "disabled", "cooldown"] && pooled[0].recentRequests == 4 && pooled[0].session?.percent == 50)
+assert(pooled[0].observedAt != nil, "Microsecond proxy timestamps parse")
+let codexHome = FileManager.default.temporaryDirectory.appendingPathComponent("boring-codex-\(UUID().uuidString)")
+let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: quotaNow)
+let codexDay = codexHome.appendingPathComponent(String(format: ".codex/sessions/%04d/%02d/%02d", parts.year!, parts.month!, parts.day!))
+try FileManager.default.createDirectory(at: codexDay, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: codexHome) }
+try Data(("""
+{"timestamp":"2026-10-15T04:00:00.000Z","type":"response_item","payload":{"type":"message","content":"private text never decoded"}}
+{"timestamp":"2026-10-15T04:53:35.007Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":15.0,"window_minutes":10080,"resets_at":1792483216},"secondary":{"used_percent":40,"window_minutes":300,"resets_at":1792050000},"plan_type":"prolite","rate_limit_reached_type":null}}}
+
+""").utf8).write(to: codexDay.appendingPathComponent("rollout-test.jsonl"))
+let codexLimits = AIStatusReader.codexAccount(home: codexHome, now: quotaNow)!
+assert(codexLimits.windows.map(\.id) == ["five_hour", "seven_day"] && codexLimits.windows[1].percent == 15 && codexLimits.state == "ok")
+var ringStatus = NotchAIStatus(proxyConfigured: true, proxyReachable: true, accounts: pooled + [codexLimits])
+ringStatus.lastUsedID = "a1"; assert(ringStatus.ringAccount?.id == "a1")
+ringStatus.lastUsedID = nil; ringStatus.nextID = nil; assert(ringStatus.ringAccount?.provider == "codex", "Without the proxy the ring follows Codex")
+assert(AIStatusReader.launchAgentLabel(home: codexHome) == nil)
 if CommandLine.arguments.contains("--live") {
+let meterFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Codex Token Meter/machine-usage-history.json")
+let meterBefore = try Data(contentsOf: meterFile)
 let live = TokenUsageReader().sample()
+// AI Token Meter rewrites its report every few minutes; compare totals only against an unchanged file.
+let meterStable = (try? Data(contentsOf: meterFile)) == meterBefore
 assert(live.error == nil, "Installed meter aggregate should parse")
 assert(live.periods.count == 3 && !live.months.isEmpty)
 assert(live.periods[2].tokens >= live.periods[1].tokens)
@@ -153,7 +197,7 @@ let original = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as
 let originalDays = original["localCodexByDay"] as! [String: [String: Any]]
 let originalTotal = originalDays.values.reduce(Int64(0)) { $0 + (($1["usage"] as! [String: Any])["total"] as! NSNumber).int64Value }
 let originalCost = originalDays.values.reduce(0.0) { $0 + ($1["apiEquivalentUSD"] as! NSNumber).doubleValue }
-assert(live.periods[2].tokens == originalTotal)
+assert(!meterStable || live.periods[2].tokens == originalTotal)
 let legacy = try TokenUsageReader.decode(Data(contentsOf: file))
 assert(abs(legacy.periods[2].estimatedUSD - originalCost) < 0.0001)
 assert(abs(live.periods[2].estimatedUSD - live.periods[2].models.reduce(0) { $0 + $1.estimatedUSD }) < 0.0001)
@@ -185,7 +229,8 @@ for case let localFile as URL in enumerator where localFile.pathExtension == "js
 let independentlyValidated = try ClaudeLocalUsageReader.aggregate(metadataEvents, now: validationNow, timeZone: .current, pricing: TokenPricingCatalog.seed)
 assert(independentlyValidated.periods[2].tokens == independent.values.reduce(0, +), "Claude counts must match independent raw-field sums and message deduplication")
 assert(live.claude?.notice == nil)
-assert(live.source("all").periods[2].tokens == originalTotal + claudeTotal)
+assert(!meterStable || live.source("all").periods[2].tokens == originalTotal + claudeTotal)
+if !meterStable { print("Note: AI Token Meter updated its report during the live check; Codex total equality skipped") }
 for source in [live.source("codex"), live.source("claude"), live.source("all")] {
     for period in source.periods {
         assert(period.models.reduce(0) { $0 + $1.tokens } == period.tokens)
@@ -194,5 +239,8 @@ for source in [live.source("codex"), live.source("claude"), live.source("all")] 
     }
 }
 assert(live.source("claude").periods[2].estimatedUSD > 0, "Live Claude usage must now be priced")
+let liveStatus = AIStatusReader.shared.sample(detailed: false)
+assert(!liveStatus.proxyConfigured || liveStatus.proxyReachable, "Configured proxy should answer locally")
+assert(liveStatus.accounts.allSatisfy { $0.windows.allSatisfy { (0...100).contains($0.percent) } })
 }
-print("Token usage checks passed: calendar boundaries, cache accounting, price coverage, schema validation, Claude cache accounting, combined and partial totals, price conversion and category charges, model reconciliation, and live aggregate reconciliation")
+print("Token usage checks passed: calendar boundaries, cache accounting, price coverage, schema validation, Claude cache accounting, combined and partial totals, price conversion and category charges, model reconciliation, proxy-routed model attribution, incremental session reads, account quota parsing, and live aggregate reconciliation")
