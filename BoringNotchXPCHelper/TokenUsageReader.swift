@@ -1,35 +1,40 @@
 import Foundation
 
-/// Reads only AI Token Meter's aggregate report, never credentials or raw conversations.
+/// Decodes only aggregate token fields from AI Token Meter, never credentials or raw conversations.
 struct TokenUsageReader {
     struct History: Decodable {
         let version: Int
         let localCodexByDay: [String: Day]
         let machine: Machine
         let latestAccountUsage: Account?
+        let updatedAt: Date?
     }
-    struct Machine: Decodable { let timeZoneIdentifier: String }
+    struct Machine: Codable { let timeZoneIdentifier: String }
     struct Account: Decodable {
         struct Summary: Decodable { let lifetimeTokens: Int64 }
         let summary: Summary
         let readAt: Date
     }
-    struct Usage: Decodable {
+    struct Usage: Codable {
         let input: Int64
         let cachedInput: Int64
         let output: Int64
         let total: Int64
+        var cacheCreationInput: Int64? = nil
+        var cacheCreationInput1h: Int64? = nil
     }
-    struct Day: Decodable {
+    struct ModelUsage: Codable { let name: String; let usage: Usage }
+    struct Day: Codable {
         let day: String
         let usage: Usage
         let apiEquivalentUSD: Double
         let apiEquivalentPricedTokens: Int64
         let lastObservedAt: Date
+        var modelBreakdown: [ModelUsage]? = nil
     }
     enum InvalidHistory: Error { case unsupported, invalid }
 
-    static func decode(_ data: Data, now: Date = Date()) throws -> NotchTokenSnapshot {
+    static func decode(_ data: Data, now: Date = Date(), pricing: [String: NotchTokenRate]? = nil, provider: String = "codex") throws -> NotchTokenSnapshot {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let value = try decoder.singleValueContainer().decode(String.self)
@@ -55,13 +60,16 @@ struct TokenUsageReader {
         var observed: Date?
         var firstDay: String?
         var cacheCountsInconsistent = false
-        func accumulate(_ day: Day, into period: inout NotchTokenPeriod) {
+        func accumulate(_ day: Day, models: [NotchTokenModel], into period: inout NotchTokenPeriod) {
             period.tokens += day.usage.total
             period.input += day.usage.input
             period.cached += day.usage.cachedInput
             period.output += day.usage.output
-            period.estimatedUSD += day.apiEquivalentUSD
-            period.pricedTokens += min(day.usage.total, day.apiEquivalentPricedTokens)
+            period.estimatedUSD += pricing == nil ? day.apiEquivalentUSD : models.reduce(0) { $0 + $1.estimatedUSD }
+            period.pricedTokens += pricing == nil ? min(day.usage.total, day.apiEquivalentPricedTokens) : models.reduce(0) { $0 + $1.pricedTokens }
+            var value = NotchTokenPeriod(id: "models", title: "Models")
+            value.models = models
+            period.add(value)
         }
         for (key, day) in history.localCodexByDay {
             guard key == day.day, let date = formatter.date(from: key), formatter.string(from: date) == key,
@@ -71,35 +79,168 @@ struct TokenUsageReader {
                   day.usage.output >= 0, day.usage.output <= day.usage.total,
                   day.apiEquivalentUSD.isFinite, day.apiEquivalentUSD >= 0,
                   day.apiEquivalentPricedTokens >= 0 else { throw InvalidHistory.invalid }
+            guard valid(day.usage) else { throw InvalidHistory.invalid }
             guard key <= today else { continue }
             cacheCountsInconsistent = cacheCountsInconsistent || day.usage.cachedInput > day.usage.input
+            let rows = try modelRows(day, provider: provider, pricing: pricing ?? [:])
             let monthKey = String(key.prefix(7))
-            if key == today { accumulate(day, into: &periods[0]) }
-            if monthKey == month { accumulate(day, into: &periods[1]) }
-            accumulate(day, into: &periods[2])
+            if key == today { accumulate(day, models: rows, into: &periods[0]) }
+            if monthKey == month { accumulate(day, models: rows, into: &periods[1]) }
+            accumulate(day, models: rows, into: &periods[2])
             var bucket = months[monthKey] ?? NotchTokenPeriod(id: monthKey, title: monthKey)
-            accumulate(day, into: &bucket); months[monthKey] = bucket
+            accumulate(day, models: rows, into: &bucket); months[monthKey] = bucket
             observed = max(observed ?? .distantPast, day.lastObservedAt)
             firstDay = min(firstDay ?? key, key)
         }
+        guard periods[2].tokens <= 1_000_000_000_000_000_000,
+              periods[2].cached <= 1_000_000_000_000_000_000 else { throw InvalidHistory.invalid }
         return NotchTokenSnapshot(periods: periods, months: months.values.sorted { $0.id > $1.id },
-            sampledAt: observed ?? .distantPast, firstDay: firstDay,
+            sampledAt: history.updatedAt ?? observed ?? .distantPast, firstDay: firstDay,
             accountLifetimeTokens: history.latestAccountUsage?.summary.lifetimeTokens,
             accountReadAt: history.latestAccountUsage?.readAt,
             cacheCountsInconsistent: cacheCountsInconsistent,
             error: history.localCodexByDay.isEmpty ? "No local usage recorded yet. Open AI Token Meter to scan history." : nil)
     }
 
-    func sample() -> NotchTokenSnapshot {
-        let file = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Codex Token Meter/machine-usage-history.json")
-        do {
-            let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size < 10_000_000 else { throw InvalidHistory.invalid }
-            return try Self.decode(Data(contentsOf: file))
-        } catch {
-            return NotchTokenSnapshot(periods: [], months: [], sampledAt: Date(),
-                error: "AI Token Meter history is unavailable. Open the meter to refresh its local report.")
+    private static func modelRows(_ day: Day, provider: String, pricing: [String: NotchTokenRate]) throws -> [NotchTokenModel] {
+        let breakdown = day.modelBreakdown ?? []
+        guard breakdown.count <= 1000 else { throw InvalidHistory.invalid }
+        var rows: [String: NotchTokenModel] = [:]
+        var accounted = Usage(input: 0, cachedInput: 0, output: 0, total: 0, cacheCreationInput: 0, cacheCreationInput1h: 0)
+        for model in breakdown {
+            let u = model.usage
+            guard model.name.count <= 200, valid(u), u.total <= day.usage.total else { throw InvalidHistory.invalid }
+            var row = NotchTokenModel(provider: provider, name: model.name, tokens: u.total, input: u.input,
+                cached: u.cachedInput, output: u.output, write5m: u.cacheCreationInput ?? 0, write1h: u.cacheCreationInput1h ?? 0)
+            row.price(using: TokenPricingCatalog.resolve(model.name, provider: provider, rates: pricing))
+            if let old = rows[row.id] { row.add(old) }
+            rows[row.id] = row
+            accounted = Usage(input: accounted.input + u.input, cachedInput: accounted.cachedInput + u.cachedInput,
+                output: accounted.output + u.output, total: accounted.total + u.total,
+                cacheCreationInput: (accounted.cacheCreationInput ?? 0) + (u.cacheCreationInput ?? 0),
+                cacheCreationInput1h: (accounted.cacheCreationInput1h ?? 0) + (u.cacheCreationInput1h ?? 0))
+            guard accounted.total <= day.usage.total else { throw InvalidHistory.invalid }
         }
+        if accounted.total < day.usage.total {
+            let row = NotchTokenModel(provider: provider, name: "Unattributed model", tokens: day.usage.total - accounted.total,
+                input: max(0, day.usage.input - accounted.input), cached: max(0, day.usage.cachedInput - accounted.cachedInput),
+                output: max(0, day.usage.output - accounted.output),
+                write5m: max(0, (day.usage.cacheCreationInput ?? 0) - (accounted.cacheCreationInput ?? 0)),
+                write1h: max(0, (day.usage.cacheCreationInput1h ?? 0) - (accounted.cacheCreationInput1h ?? 0)))
+            rows[row.id] = row
+        }
+        return rows.values.filter { $0.tokens > 0 }.sorted { $0.tokens > $1.tokens }
     }
+    private static func valid(_ u: Usage) -> Bool {
+        let limit: Int64 = 1_000_000_000_000_000
+        return (0...limit).contains(u.total) && (0...u.total).contains(u.input) && (0...u.total).contains(u.output)
+            && (0...limit).contains(u.cachedInput) && (0...limit).contains(u.cacheCreationInput ?? 0)
+            && (0...limit).contains(u.cacheCreationInput1h ?? 0)
+    }
+
+    // Details-cache dates use Foundation's reference epoch, unlike the ISO dates in machine history.
+    struct Details: Decodable {
+        let version: Int
+        let snapshot: Reports
+        struct Reports: Decodable { let claude: Report }
+        struct Report: Decodable { let byDay: [ReportDay]; let scannedAt: Date }
+        struct ReportDay: Decodable { let day: String; let usage: Usage; let modelBreakdown: [ModelUsage]? }
+    }
+
+    struct Dashboard: Decodable {
+        let version: Int
+        let entries: [Entry]
+        struct Entry: Decodable { let windowHours: Int; let quota: String; let report: Details.Report }
+    }
+
+    static func decodeClaude(_ data: Data, dashboard: Data? = nil, now: Date = Date(), timeZone: TimeZone = .current, pricing: [String: NotchTokenRate]? = nil) throws -> NotchTokenSource {
+        let details = try JSONDecoder().decode(Details.self, from: data)
+        // Versions 10-12 have the same Claude daily usage contract. Future schemas fail explicitly.
+        guard (10...12).contains(details.version) else { throw InvalidHistory.unsupported }
+        guard details.snapshot.claude.byDay.count <= 5000,
+              details.snapshot.claude.scannedAt.timeIntervalSinceReferenceDate.isFinite,
+              details.snapshot.claude.scannedAt <= now.addingTimeInterval(300) else { throw InvalidHistory.invalid }
+        var days: [String: Day] = [:]
+        for day in details.snapshot.claude.byDay {
+            guard days[day.day] == nil else { throw InvalidHistory.invalid }
+            days[day.day] = Day(day: day.day, usage: day.usage, apiEquivalentUSD: 0,
+                apiEquivalentPricedTokens: 0, lastObservedAt: details.snapshot.claude.scannedAt, modelBreakdown: day.modelBreakdown)
+        }
+        var sampledAt = details.snapshot.claude.scannedAt
+        if let dashboard, let cache = try? JSONDecoder().decode(Dashboard.self, from: dashboard),
+           cache.version == 6, cache.entries.count <= 100 {
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = timeZone
+            formatter.dateFormat = "yyyy-MM-dd"
+            formatter.isLenient = false
+            // Newer rolling-window reports replace whole covered days, never add to history.
+            // The partial first day is excluded, including on 25-hour daylight-saving days.
+            let entries = cache.entries.filter {
+                $0.quota == "claude" && (24...8760).contains($0.windowHours)
+                    && $0.report.scannedAt > sampledAt && $0.report.scannedAt <= now.addingTimeInterval(300)
+                    && $0.report.byDay.count <= 5000
+            }.sorted { $0.report.scannedAt < $1.report.scannedAt }
+            for entry in entries {
+                let start = entry.report.scannedAt.addingTimeInterval(-Double(entry.windowHours) * 3600)
+                var seen = Set<String>()
+                for day in entry.report.byDay {
+                    guard seen.insert(day.day).inserted else { throw InvalidHistory.invalid }
+                    guard let date = formatter.date(from: day.day), formatter.string(from: date) == day.day,
+                          date >= start, date <= now else { continue }
+                    days[day.day] = Day(day: day.day, usage: day.usage, apiEquivalentUSD: 0,
+                        apiEquivalentPricedTokens: 0, lastObservedAt: entry.report.scannedAt, modelBreakdown: day.modelBreakdown)
+                    sampledAt = max(sampledAt, entry.report.scannedAt)
+                }
+            }
+        }
+        // Reuse the validated calendar aggregation without decoding unrelated cache fields.
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let report = ClaudeHistory(machine: Machine(timeZoneIdentifier: timeZone.identifier),
+            localCodexByDay: days, updatedAt: sampledAt)
+        let value = try decode(encoder.encode(report), now: now, pricing: pricing, provider: "claude")
+        return NotchTokenSource(periods: value.periods, months: value.months,
+            sampledAt: value.sampledAt, cacheCountsInconsistent: value.cacheCountsInconsistent,
+            error: days.isEmpty ? "No Claude Code history available. Open AI Token Meter to scan usage." : nil)
+    }
+
+    struct ClaudeHistory: Encodable {
+        let version = 1
+        let machine: Machine
+        let localCodexByDay: [String: Day]
+        let updatedAt: Date
+    }
+
+    private func read(_ file: URL, limit: Int) throws -> Data {
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= limit else { throw InvalidHistory.invalid }
+        let data = try Data(contentsOf: file)
+        guard data.count <= limit else { throw InvalidHistory.invalid }
+        return data
+    }
+
+    func sample() -> NotchTokenSnapshot {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Codex Token Meter")
+        TokenPricingCatalog.shared.refreshIfNeeded()
+        let pricing = TokenPricingCatalog.shared.snapshot()
+        var value: NotchTokenSnapshot
+        var timeZone = TimeZone.current
+        do {
+            let data = try read(directory.appendingPathComponent("machine-usage-history.json"), limit: 10_000_000)
+            value = try Self.decode(data, pricing: pricing)
+            // Read only the timezone in addition to the already decoded Codex aggregates.
+            if let history = try? JSONDecoder().decode(TimeZoneOnly.self, from: data) {
+                timeZone = TimeZone(identifier: history.machine.timeZoneIdentifier) ?? .current
+            }
+        } catch {
+            value = NotchTokenSnapshot(periods: [], months: [], sampledAt: .distantPast,
+                error: "Codex history is unavailable. Open AI Token Meter to refresh its local report.")
+        }
+        value.claude = ClaudeLocalUsageReader.shared.sample(timeZone: timeZone, pricing: pricing)
+        return value
+    }
+    private struct TimeZoneOnly: Decodable { let machine: Machine }
 }

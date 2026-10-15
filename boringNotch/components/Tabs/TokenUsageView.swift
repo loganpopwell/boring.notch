@@ -6,9 +6,20 @@ import SwiftUI
     @Published var loading = false
     private var connection: NSXPCConnection?
     private var requestID = UUID()
+    private var lastMeterLaunch = Date.distantPast
 
     func refresh() {
         guard !loading else { return }
+        // The report writer is a separate menu-bar app. Relaunch it quietly if it has stopped.
+        if !NSRunningApplication.runningApplications(withBundleIdentifier: "local.codex-token-meter").isEmpty {
+            lastMeterLaunch = .distantPast
+        } else if Date().timeIntervalSince(lastMeterLaunch) > 60,
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "local.codex-token-meter") {
+            lastMeterLaunch = Date()
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in }
+        }
         if connection == nil {
             let value = NSXPCConnection(serviceName: "theboringteam.boringnotch.BoringNotchXPCHelper")
             value.remoteObjectInterface = NSXPCInterface(with: BoringNotchXPCHelperProtocol.self)
@@ -21,7 +32,7 @@ import SwiftUI
                 guard let self, self.requestID == id, self.loading else { return }
                 self.loading = false
                 if let data, let next = try? JSONDecoder().decode(NotchTokenSnapshot.self, from: data) {
-                    self.snapshot = next; self.failure = next.error
+                    self.snapshot = next; self.failure = nil
                 } else {
                     self.failure = "Could not read the meter. Try refreshing."
                     self.connection?.invalidate(); self.connection = nil
@@ -41,8 +52,16 @@ struct TokenUsageView: View {
     @StateObject private var model = TokenUsageModel()
     @State private var selected = "month"
     @State private var history = false
-    private var period: NotchTokenPeriod? { model.snapshot?.periods.first { $0.id == selected } }
-    private var stale: Bool { model.snapshot.map { Date().timeIntervalSince($0.sampledAt) > 3600 } ?? false }
+    @State private var panel = "overview"
+    @State private var selectedModelID: String?
+    @State private var provider = "all"
+    private var source: NotchTokenSource? { model.snapshot?.source(provider) }
+    private var failure: String? { model.failure ?? source?.error }
+    private var providerTitle: String { provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Codex + Claude" }
+    private var expanded: Bool { history || panel != "overview" }
+    private var chosenModel: NotchTokenModel? { period?.models.first { $0.id == selectedModelID } }
+    private var period: NotchTokenPeriod? { source?.periods.first { $0.id == selected } }
+    private var stale: Bool { source.map { Date().timeIntervalSince($0.sampledAt) > 3600 } ?? false }
     private func count(_ value: Int64) -> String {
         if value >= 1_000_000_000 { return String(format: "%.2fB", Double(value) / 1_000_000_000) }
         if value >= 1_000_000 { return String(format: "%.2fM", Double(value) / 1_000_000) }
@@ -60,6 +79,16 @@ struct TokenUsageView: View {
     }
     var body: some View {
         VStack(spacing: 7) {
+            HStack(spacing: 6) {
+                ForEach([("all", "All"), ("codex", "Codex"), ("claude", "Claude Code")], id: \.0) { id, title in
+                    Button { provider = id; selectedModelID = nil; if panel == "detail" { panel = "models" } } label: {
+                        Text(title).padding(.horizontal, 9).padding(.vertical, 3)
+                            .background(Capsule().fill(provider == id ? Color.white.opacity(0.12) : .clear))
+                    }.buttonStyle(.plain).foregroundStyle(provider == id ? .primary : .secondary)
+                }
+                Spacer()
+                Text("Local token usage").foregroundStyle(.secondary)
+            }.font(.system(size: 10))
             HStack(spacing: 7) {
                 if history {
                     Button { history = false } label: { Label("Overview", systemImage: "chevron.left") }.buttonStyle(.plain)
@@ -73,19 +102,23 @@ struct TokenUsageView: View {
                         }.buttonStyle(.plain).foregroundStyle(selected == id ? .primary : .secondary)
                     }
                     Spacer()
-                    Button { history = true } label: { Image(systemName: "calendar") }.buttonStyle(.plain).help("Monthly history").accessibilityLabel("Monthly token history")
+                    Button("Models") { panel = panel == "models" ? "overview" : "models"; selectedModelID = nil }.buttonStyle(.plain)
+                        .foregroundStyle(panel == "models" || panel == "detail" ? .cyan : .secondary)
+                    Button("Pricing") { panel = panel == "pricing" ? "overview" : "pricing"; selectedModelID = nil }.buttonStyle(.plain)
+                        .foregroundStyle(panel == "pricing" ? .cyan : .secondary)
+                    Button { history = true; panel = "overview" } label: { Image(systemName: "calendar") }.buttonStyle(.plain).help("Monthly history").accessibilityLabel("Monthly token history")
                 }
                 Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).disabled(model.loading).help("Reload AI Token Meter report").accessibilityLabel("Refresh token usage")
+                    .buttonStyle(.plain).disabled(model.loading).help("Refresh Codex and Claude usage").accessibilityLabel("Refresh token usage")
                 Button(action: openMeter) { Image(systemName: "arrow.up.forward.app") }
                     .buttonStyle(.plain).help("Open AI Token Meter to update history").accessibilityLabel("Open AI Token Meter")
             }.font(.system(size: 11))
-            if let failure = model.failure {
+            if let failure = failure {
                 VStack(spacing: 8) {
                     Text(failure).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     Button("Open AI Token Meter", action: openMeter).buttonStyle(.plain)
                 }.font(.system(size: 12)).frame(maxWidth: .infinity, minHeight: history ? 198 : 70)
-            } else if history, let snapshot = model.snapshot {
+            } else if history, let snapshot = source {
                 ScrollView {
                     LazyVStack(spacing: 5) {
                         ForEach(snapshot.months) { month in
@@ -99,18 +132,33 @@ struct TokenUsageView: View {
                                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .secondarySystemFill)))
                         }
                     }
-                }.frame(height: 198)
+                }.frame(height: 176)
+            } else if panel != "overview", let p = period {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Button { panel = panel == "detail" ? "models" : "overview"; selectedModelID = nil } label: {
+                            Label(panel == "detail" ? "Models" : "Overview", systemImage: "chevron.left")
+                        }.buttonStyle(.plain)
+                        Spacer()
+                        Text(panel == "pricing" ? "Model prices" : panel == "detail" ? "Model details" : "Models · " + p.title).fontWeight(.semibold)
+                    }.font(.system(size: 10))
+                    ScrollView {
+                        if panel == "pricing" { TokenPricingChart(period: p, onSelect: openModel) }
+                        else if panel == "detail", let chosenModel { TokenModelDetail(model: chosenModel, period: p) }
+                        else { TokenModelList(period: p, onSelect: openModel) }
+                    }.frame(height: 161)
+                }
             } else if let p = period {
                 HStack(spacing: 8) {
-                    metric("LOCAL CODEX TOKENS", value: count(p.tokens), subtitle: selected == "lifetime" ? "Recorded history on this Mac" : p.title, accent: false)
-                    metric("API-EQUIVALENT COST", value: cost(p), subtitle: p.coverage < 1 ? String(format: "%.1f%% priced · partial USD estimate", floor(p.coverage * 1000) / 10) : "Estimated USD · not your bill", accent: true)
+                    metric(providerTitle.uppercased() + " TOKENS", value: count(p.tokens), subtitle: selected == "lifetime" ? (provider == "codex" ? "Recorded history on this Mac" : "Retained history on this Mac") : p.title, accent: false)
+                    metric("API-EQUIVALENT COST", value: cost(p), subtitle: p.coverage < 1 ? String(format: "%.1f%% priced · partial USD estimate", floor(p.coverage * 1000) / 10) : (p.models.contains(where: \.hasProxy) ? "Estimated USD · includes proxy pricing" : "Estimated USD · not your bill"), accent: true)
                 }
                 HStack(spacing: 6) {
                     tokenPiece("Input", p.input)
                     tokenPiece("Cached", p.cached)
                     tokenPiece("Output", p.output)
                     Spacer(minLength: 0)
-                    if selected == "lifetime", let account = model.snapshot?.accountLifetimeTokens {
+                    if provider == "codex", selected == "lifetime", let account = model.snapshot?.accountLifetimeTokens {
                         Text("Account: " + count(account)).foregroundStyle(.secondary)
                             .help("AI Token Meter's separate account lifetime total, as of \(model.snapshot?.accountReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unknown"). It is not added to local usage or used to estimate cost.")
                     }
@@ -120,27 +168,29 @@ struct TokenUsageView: View {
             }
             HStack(spacing: 5) {
                 Circle().fill(stale ? .orange : .mint).frame(width: 4, height: 4)
-                if let date = model.snapshot?.sampledAt, date > .distantPast {
+                if let date = source?.sampledAt, date > .distantPast {
                     Text(stale ? "Last scan" : "Updated")
                     Text(date, style: .relative)
-                    Text("ago · AI Token Meter")
+                    Text(provider == "claude" ? "ago · Local Claude Code" : provider == "codex" ? "ago · AI Token Meter" : "ago · Local sources")
                 } else { Text("Local history · AI Token Meter") }
                 Spacer(minLength: 0)
-                Text(history ? "USD estimate · partial pricing marked" : (model.snapshot?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Cached tokens are part of input"))
-            }.font(.system(size: 9)).foregroundStyle(stale ? .orange : .secondary).lineLimit(1)
+                Text(source?.notice ?? (history ? "USD estimate · partial pricing marked" : (source?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Cached tokens are part of input")))
+            }.font(.system(size: 9)).foregroundStyle(stale || source?.notice != nil ? .orange : .secondary).lineLimit(1)
         }
         .padding(.horizontal, 12).frame(width: 600)
-        .onChange(of: history) { _, value in
-            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = value ? 320 : openNotchSize.height }
+        .onChange(of: expanded) { _, value in
+            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = value ? 320 : max(openNotchSize.height, 210) }
         }
         .onDisappear { if vm.notchState == .open { vm.notchSize.height = openNotchSize.height } }
         .task {
+            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = expanded ? 320 : max(openNotchSize.height, 210) }
             while !Task.isCancelled {
                 model.refresh()
                 do { try await Task.sleep(for: .seconds(30)) } catch { break }
             }
         }
     }
+    private func openModel(_ value: NotchTokenModel) { selectedModelID = value.id; panel = "detail" }
     private func tokenPiece(_ title: String, _ amount: Int64) -> some View {
         HStack(spacing: 3) { Text(title).foregroundStyle(.secondary); Text(count(amount)).monospacedDigit() }
             .padding(.trailing, 8).help(amount.formatted() + " " + title.lowercased() + " tokens")

@@ -11,7 +11,7 @@ CPU uses deltas of Mach CPU ticks, normalized across cores. Memory excludes file
 Build:
 
 ```sh
-xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=281 MARKETING_VERSION=2.8-beta.0-stats.2
+xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=283 MARKETING_VERSION=2.8-beta.0-stats.4
 xcrun swiftc Shared/SystemStatsReader.swift Shared/ProcessStatsSnapshot.swift BoringNotchXPCHelper/ProcessStatsReader.swift Tests/main.swift -o /tmp/boring-stats-check
 /tmp/boring-stats-check
 ```
@@ -25,14 +25,23 @@ Verification: Release build and standalone sampling tests passed, including Mach
 
 ## Tokens tab
 
-Tab order is Home, Shelf, Stats, Tokens. Tokens reads the installed [AI Token Meter](https://github.com/prefect12/codex-token-meter) aggregate `machine-usage-history.json` through the existing XPC helper. This is an integration with its version 1 report schema, not a separate log scanner. Keep AI Token Meter running to refresh the underlying history; the tab reloads its report every 30 seconds while visible and includes an Open Meter button. A last-scan indicator turns orange after one hour. Missing or incompatible reports show an explicit unavailable state.
+Tab order is Home, Shelf, Stats, Tokens. Codex reads the installed [AI Token Meter](https://github.com/prefect12/codex-token-meter) `machine-usage-history.json` version 1 through the existing XPC helper. Claude Code reads assistant-message usage metadata from local `.claude/projects/**/*.jsonl`, including subagents. Only model, timestamp, message IDs and numeric usage are decoded, without content or credentials. Message IDs deduplicate repeated streaming entries and files, retaining the largest completed usage. The parent `cache_creation_input_tokens` equals the total of duration subtypes and is counted once. The 1-hour subtype is priced at its own rate; remaining writes use the default 5-minute rate, including legacy records without a duration breakdown. This corrects the meter scanner's parent-plus-subtype double count. Unchanged files use an in-memory metadata cache keyed by modification date and size. Missing or partially unreadable sources are explicit. Unsupported Codex schemas show unavailable. Claude metadata is never exported or persisted by this integration.
 
-Today and calendar-month boundaries follow the meter's recorded timezone. Lifetime means all retained local daily records, not guaranteed complete account history. Account lifetime is displayed separately when the meter has it. API-equivalent USD sums the meter's estimates without maintaining an independent price table. Unknown-model tokens reduce priced coverage; fully unpriced usage is labeled Unpriced. These are estimates, not subscription bills or savings. Cached input is already part of input, and reasoning output is not added again. Older source cache counts can exceed reported input; these are retained and flagged without changing token totals or the meter's cost estimates. Only aggregate counts and estimates cross into the notch; the integration does not read credentials, prompts, or raw conversations, and performs no network requests.
+All, Codex, and Claude Code filters share Today, This month, Lifetime, and monthly history. Combined totals add each local source once, and missing sources produce an explicit partial-total notice. The UI starts the installed meter quietly when it is stopped, with a one-minute retry interval, and reloads reports every 30 seconds while visible. Freshness follows each source's scan time (the older scan for combined totals), with an orange indicator after one hour. The manual refresh and Open Meter controls remain available. Claude refreshes independently of the meter.
+
+Today and calendar-month boundaries follow the meter's recorded timezone. Lifetime means retained local daily records, not complete account history; Claude includes all retained local usage files. Codex account lifetime is displayed separately.
+
+Per-model usage comes from Codex daily `modelBreakdown` records and normalized Claude assistant usage. Summaries, monthly history, model shares, and category charges all use the same current price snapshot so costs reconcile. Unattributed token counts remain explicit rows. The independent pricing reader uses the public OpenRouter model catalog, with explicit Claude aliases, exact model IDs, and no fuzzy successor-model matching. Prices are USD per million tokens; public per-token prices are converted by multiplying by one million. A bundled public snapshot verified on 2026-10-01 UTC and a price-only cache at `Library/Application Support/BoringNotch/token-prices.json` support offline operation. HTTPS catalog refreshes occur daily, with failed refresh attempts limited to once every five minutes. Network requests send no usage, selected model IDs, prompts, credentials, or private records. The Claude reader decodes only usage metadata, without conversation content or credentials.
+
+Models shows tokens, token share, and estimated USD for each model in Today, This month, or Lifetime. Pricing compares input, cache-read, output, 5-minute cache-write, and 1-hour cache-write rates. Selecting a model shows category counts, rates, charges, cost share, pricing provenance, and the checked date. Each day's cache read/write tokens are subtracted from input before pricing fresh input; reasoning output is already included in output. Inconsistent cache counts are capped to input for estimates, flagged, and retained in raw recorded totals. Known category charges are summed; missing category prices reduce coverage. Unknown models stay unpriced. Spark uses an explicit proxy based on GPT-5.3 Codex rates, labeled in both model and price views. Standard API estimates at current rates exclude subscription billing, Fast mode, per-request long-context surcharges, and tool fees.
+
 
 Token-reader checks use synthetic fixtures, with optional local integration validation:
 
 ```sh
-xcrun swiftc Shared/TokenUsageSnapshot.swift BoringNotchXPCHelper/TokenUsageReader.swift Tests/Tokens/main.swift -o /tmp/boring-token-check
+xcrun swiftc Shared/TokenUsageSnapshot.swift BoringNotchXPCHelper/TokenPricingCatalog.swift BoringNotchXPCHelper/TokenUsageReader.swift BoringNotchXPCHelper/ClaudeLocalUsageReader.swift Tests/Tokens/main.swift -o /tmp/boring-token-check
 /tmp/boring-token-check
 /tmp/boring-token-check --live
 ```
+
+Local build 283 verification: Release compilation and synthetic/live token checks passed. Independent raw-field sums matched Claude message-ID deduplication using identical file snapshots. Installed main/helper checksums, strict signatures, and preferences were verified. Live UI verified model shares, estimated USD, category charges, Claude 1-hour writes, combined pricing chart, and Spark proxy provenance. Home calendar events, Calendar/Reminders lists, and changing Stats readings were verified after installation.

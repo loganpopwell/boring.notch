@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AAAA00260000000000000005 /* TokenModelDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAA00260000000000000006; };
 		AAAA00260000000000000003 /* TokenUsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAA00260000000000000004; };
 		AAAA00260000000000000001 /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAA00260000000000000002; };
 		07FE456E7AEA085D9FCA6D97 /* MeetingLinkDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B2A5E5F4D28F1DD9CD0B09 /* MeetingLinkDetector.swift */; };
@@ -185,6 +186,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AAAA00260000000000000006 /* TokenModelDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenModelDetailsView.swift; sourceTree = "<group>"; };
 		AAAA00260000000000000004 /* TokenUsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenUsageView.swift; sourceTree = "<group>"; };
 		AAAA00260000000000000002 /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		0268933F488E47DFB58E48CF /* VisualEffectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualEffectView.swift; sourceTree = "<group>"; };
@@ -731,6 +733,7 @@
 				9A0887342C7AFF8E00C160EA /* TabSelectionView.swift */,
                 AAAA00260000000000000002 /* StatsView.swift */,
                 AAAA00260000000000000004 /* TokenUsageView.swift */,
+                AAAA00260000000000000006 /* TokenModelDetailsView.swift */,
 			);
 			path = Tabs;
 			sourceTree = "<group>";
@@ -1071,6 +1074,7 @@
 				9A0887352C7AFF8E00C160EA /* TabSelectionView.swift in Sources */,
                 AAAA00260000000000000001 /* StatsView.swift in Sources */,
                 AAAA00260000000000000003 /* TokenUsageView.swift in Sources */,
+                AAAA00260000000000000005 /* TokenModelDetailsView.swift in Sources */,
 				112FB7352CCF16F70015238C /* NotchSpaceManager.swift in Sources */,
 				90ED6E81035940418671DCEA /* NotchWindowManager.swift in Sources */,
 				1153BD982D9881F900979FB0 /* AppleScriptHelper.swift in Sources */,
