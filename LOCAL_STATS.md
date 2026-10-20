@@ -11,7 +11,7 @@ CPU uses deltas of Mach CPU ticks, normalized across cores. Memory excludes file
 Build:
 
 ```sh
-xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=285 MARKETING_VERSION=2.8-beta.0-stats.6
+xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=286 MARKETING_VERSION=2.8-beta.0-stats.7
 xcrun swiftc Shared/SystemStatsReader.swift Shared/ProcessStatsSnapshot.swift BoringNotchXPCHelper/ProcessStatsReader.swift Tests/main.swift -o /tmp/boring-stats-check
 /tmp/boring-stats-check
 ```

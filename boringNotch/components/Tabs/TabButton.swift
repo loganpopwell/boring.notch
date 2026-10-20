@@ -11,12 +11,14 @@ struct TabButton: View {
     let label: String
     let icon: String
     let selected: Bool
+    /// Narrower padding so five tabs fit beside the camera housing instead of running under it.
+    var compact = false
     let onClick: () -> Void
 
     var body: some View {
         Button(action: onClick) {
             Image(systemName: icon)
-                .padding(.horizontal, 15)
+                .padding(.horizontal, compact ? 9 : 15)
                 .contentShape(Capsule())
         }
         .buttonStyle(PlainButtonStyle())
