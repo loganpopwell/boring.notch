@@ -43,7 +43,7 @@ The Billing tab shows the LumaCore billing report's Overview, the same numbers a
 - **Coming up:** the next expected charges and invoices from Stripe's previews.
 - **Recent payments:** the last eight payments, with source and method.
 
-The helper reads `GET /api/internal/billing/notch` from `app.lumacoredesign.com` once a minute while the tab is open, using a billing-scoped internal key in `~/.config/lumacore/notch-billing-key`. The file must be owner-only (`chmod 600`); otherwise the key is ignored. Redirects are refused so the key is never forwarded. The dashboard caches the report for up to ten minutes. If a refresh fails, the last report stays on screen with an orange notice instead of showing zeros. The ↗ button opens the full report in the browser.
+The helper reads `GET /api/internal/billing/notch` from `app.lumacoredesign.com` once a minute while the tab is open, using the notch's own billing feed key in `~/.config/lumacore/notch-billing-key`. The file must be owner-only (`chmod 600`); otherwise the key is ignored. `scripts/install-billing-key.sh` creates the notch and Apple TV keys and sets them as `BILLING_FEED_TOKENS` in Vercel (`--rotate notch` or `--rotate tv` replaces one); redeploy the dashboard afterwards. Redirects are refused so the key is never forwarded. The dashboard caches the report for up to ten minutes. If a refresh fails, the last report stays on screen with an orange notice instead of showing zeros. The ↗ button opens the full report in the browser.
 
 ## Interpreting the readings
 
