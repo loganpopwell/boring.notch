@@ -41,6 +41,7 @@ final class BNLunarBrightnessEvent: NSObject, NSSecureCoding {
     func readTokenUsage(with reply: @escaping (Data?) -> Void)
     func readAIStatus(_ detailed: Bool, with reply: @escaping (Data?) -> Void)
     func restartAIProxy(with reply: @escaping (Bool) -> Void)
+    func readBillingReport(with reply: @escaping (Data?) -> Void)
     func readProcessStats(with reply: @escaping (Data?) -> Void)
     func isAccessibilityAuthorized(with reply: @escaping (Bool) -> Void)
     func requestAccessibilityAuthorization()

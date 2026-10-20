@@ -1,6 +1,6 @@
-# Boring Notch: Stats and Tokens
+# Boring Notch: Stats, Tokens and Billing
 
-A community fork of [Boring Notch](https://github.com/TheBoredTeam/boring.notch) that adds system monitoring and Codex and Claude Code token usage to the notch interface. The original Home and Shelf features remain available, with Stats and Tokens added as separate tabs.
+A community fork of [Boring Notch](https://github.com/TheBoredTeam/boring.notch) that adds system monitoring, Codex and Claude Code token usage, and the LumaCore billing report to the notch interface. The original Home and Shelf features remain available, with Stats, Tokens and Billing added as separate tabs.
 
 This fork is maintained by [Logan Popwell](https://github.com/loganpopwell) and is based on upstream commit `69c43e2`. It is an independent modification, not an official release from The Bored Team.
 
@@ -33,6 +33,17 @@ The Tokens tab's **Limits** view lists each Claude account pooled by a local [CL
 The Tokens overview also shows the tightest limit of the Claude account in use and of Codex next to the token and cost totals. Limits are read only while the Tokens tab is open; nothing runs in the closed notch.
 
 The proxy integration reads the management key from `~/.config/cliproxyapi/management-key` and connects only to `127.0.0.1`. Full account limits are requested only while the Limits view is open.
+
+## Billing tab
+
+The Billing tab shows the LumaCore billing report's Overview, the same numbers as `/staff/invoices/report` in the LumaCore dashboard:
+
+- **Overview:** MRR, ARR, at-risk MRR and potential MRR, then this month so far, this year's collections, monthly average, annualized collections, the next 30 days of expected payments, and the Stripe balance.
+- **By month:** collections for the last 12 months (hover a bar) beside this year's collections by source.
+- **Coming up:** the next expected charges and invoices from Stripe's previews.
+- **Recent payments:** the last eight payments, with source and method.
+
+The helper reads `GET /api/internal/billing/notch` from `app.lumacoredesign.com` once a minute while the tab is open, using a billing-scoped internal key in `~/.config/lumacore/notch-billing-key`. The file must be owner-only (`chmod 600`); otherwise the key is ignored. Redirects are refused so the key is never forwarded. The dashboard caches the report for up to ten minutes. If a refresh fails, the last report stays on screen with an orange notice instead of showing zeros. The ↗ button opens the full report in the browser.
 
 ## Interpreting the readings
 

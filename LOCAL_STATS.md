@@ -11,7 +11,7 @@ CPU uses deltas of Mach CPU ticks, normalized across cores. Memory excludes file
 Build:
 
 ```sh
-xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=284 MARKETING_VERSION=2.8-beta.0-stats.5
+xcodebuild -project boringNotch.xcodeproj -scheme boringNotch -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=285 MARKETING_VERSION=2.8-beta.0-stats.6
 xcrun swiftc Shared/SystemStatsReader.swift Shared/ProcessStatsSnapshot.swift BoringNotchXPCHelper/ProcessStatsReader.swift Tests/main.swift -o /tmp/boring-stats-check
 /tmp/boring-stats-check
 ```
@@ -39,7 +39,7 @@ Models shows tokens, token share, and estimated USD for each model in Today, Thi
 Token-reader checks use synthetic fixtures, with optional local integration validation:
 
 ```sh
-xcrun swiftc Shared/AIStatusSnapshot.swift Shared/TokenUsageSnapshot.swift BoringNotchXPCHelper/TokenPricingCatalog.swift BoringNotchXPCHelper/TokenUsageReader.swift BoringNotchXPCHelper/ClaudeLocalUsageReader.swift BoringNotchXPCHelper/AIStatusReader.swift Tests/Tokens/main.swift -o /tmp/boring-token-check
+xcrun swiftc Shared/AIStatusSnapshot.swift Shared/TokenUsageSnapshot.swift BoringNotchXPCHelper/TokenPricingCatalog.swift BoringNotchXPCHelper/TokenUsageReader.swift BoringNotchXPCHelper/ClaudeLocalUsageReader.swift BoringNotchXPCHelper/AIStatusReader.swift Shared/BillingReportSnapshot.swift BoringNotchXPCHelper/BillingReportReader.swift Tests/Tokens/main.swift -o /tmp/boring-token-check
 /tmp/boring-token-check
 /tmp/boring-token-check --live
 ```
@@ -65,3 +65,8 @@ The closed-notch quota ring, its alerts, and Settings › AI were removed on 202
 Sections are Overview, Models, Pricing, History, and Limits, with source and maker filters and a Today/This month/Lifetime control below. Every section uses the same content height, so the notch stays at 320 pt while the tab is open. Overview shows tokens, estimated cost, the Claude and Codex limit cards, a stacked bar of new input, cache reads and output, and the top three models. History is a bar chart of the last 12 months; hover a bar for its totals.
 
 Local build 284 verification: synthetic and live token and quota checks passed, Release build succeeded, installed ad-hoc signatures verified with `codesign --verify --deep --strict` using the previous build's app and helper entitlements, and the closed-notch ring rendered. The previous build and preferences were backed up under `~/Library/Application Support/BoringNotch/backups/`.
+
+## Billing tab
+
+Added 2026-10-19 (build 285). `BillingView.swift` (Tabs, explicit project reference) renders the dashboard's notch feed; `BillingReportReader.swift` in the helper fetches it, and `Shared/BillingReportSnapshot.swift` holds the decoded model. The feed is `lumacore-dashboard` `src/app/api/internal/billing/notch/route.ts`, built by the same `reportOverview()` as the report page's Overview tab. The key is the HMAC-derived `billing` internal API scope token, stored owner-only at `~/.config/lumacore/notch-billing-key`. Feed version 1; the reader refuses other versions.
+

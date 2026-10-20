@@ -22,11 +22,15 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     }
 
     private let aiQueue = DispatchQueue(label: "local.boringnotch.ai-status", qos: .utility)
+    private let billingQueue = DispatchQueue(label: "local.boringnotch.billing", qos: .utility)
     @objc func readAIStatus(_ detailed: Bool, with reply: @escaping (Data?) -> Void) {
         aiQueue.async { reply(try? JSONEncoder().encode(AIStatusReader.shared.sample(detailed: detailed))) }
     }
     @objc func restartAIProxy(with reply: @escaping (Bool) -> Void) {
         aiQueue.async { reply(AIStatusReader.shared.restartProxy()) }
+    }
+    @objc func readBillingReport(with reply: @escaping (Data?) -> Void) {
+        billingQueue.async { reply(try? JSONEncoder().encode(BillingReportReader.shared.sample())) }
     }
 
     private weak var connection: NSXPCConnection?

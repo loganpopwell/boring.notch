@@ -593,6 +593,8 @@ struct ContentView: View {
                             )
                         case .tokens:
                             TokenUsageView()
+                        case .billing:
+                            BillingView()
                         case .stats:
                             StatsView()
                         case .shelf:

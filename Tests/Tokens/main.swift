@@ -181,6 +181,45 @@ var poolStatus = NotchAIStatus(proxyConfigured: true, proxyReachable: true, acco
 poolStatus.lastUsedID = "a1"; assert(poolStatus.activeClaude?.id == "a1")
 poolStatus.lastUsedID = nil; poolStatus.nextID = nil; assert(poolStatus.activeClaude == nil, "Codex is never the active Claude account")
 assert(AIStatusReader.launchAgentLabel(home: codexHome) == nil)
+// Billing feed: the dashboard's JSON decodes with and without fractional seconds, and other versions are refused.
+var billingFixture: [String: Any] = [
+    "version": 1, "generatedAt": "2026-10-20T03:59:32.976Z", "currency": "usd", "now": ["year": 2026, "month": 10],
+    "recurring": ["mrr": 170152, "arr": 2041821, "atRiskMRR": 0, "trialMRR": 0, "potentialMRR": 170152, "customers": 13, "complete": true, "pastDue": 0, "trials": 0],
+    "thisMonth": ["collectedMonth": 108761, "refundedMonth": 100, "netMonth": 108661, "availableBalance": -425, "pendingBalance": 0,
+                  "payingCustomers": 13, "eligibleSubscriptions": 17, "fees": 3100],
+    "thisYear": ["year": 2026, "collected": 2551512, "paymentCount": 95, "averageMonth": 255151, "monthsCounted": 10, "annualized": 3061814],
+    "expected": ["next30Days": 94109, "next90Days": 300000],
+    "months": [["year": 2025, "month": 11, "collected": 0], ["year": 2026, "month": 10, "collected": 108761]],
+    "sources": [["source": "subscription", "label": "Subscriptions", "amount": 900000]],
+    "upcoming": [["date": "2026-10-29T06:00:00.000Z", "customer": "A", "amount": 2788, "collection": "Automatic charge"]],
+    "recent": [["date": "2026-10-09T13:58:51Z", "customer": "B", "source": "Subscriptions", "method": "Visa •••• 0289", "amount": 5000]],
+    "warnings": [],
+]
+let billing = try NotchBillingReport.decode(JSONSerialization.data(withJSONObject: billingFixture))
+assert(billing.recurring.mrr == 170152 && billing.thisMonth.availableBalance == -425 && billing.months.last?.id == "2026-10")
+assert(billing.recent[0].date == ISO8601DateFormatter().date(from: "2026-10-09T13:58:51Z"))
+billingFixture["recurring"] = (billingFixture["recurring"] as! [String: Any]).merging(["mrr": NSNull(), "arr": NSNull()]) { $1 }
+let unverified = try NotchBillingReport.decode(JSONSerialization.data(withJSONObject: billingFixture))
+assert(unverified.recurring.mrr == nil, "Unverified MRR stays unknown, not zero")
+billingFixture["version"] = 2
+assert((try? NotchBillingReport.decode(JSONSerialization.data(withJSONObject: billingFixture))) == nil)
+let billingTrip = try JSONDecoder().decode(NotchBillingStatus.self, from: JSONEncoder().encode(NotchBillingStatus(report: billing, fetchedAt: now, problem: .offline)))
+assert(billingTrip.report == billing && billingTrip.problem == .offline)
+// The billing key is used only from an owner-only file.
+let billingHome = FileManager.default.temporaryDirectory.appendingPathComponent("billing-\(UUID().uuidString)")
+let keyFile = BillingReportReader.keyFile(home: billingHome)
+try FileManager.default.createDirectory(at: keyFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+assert(BillingReportReader.readKey(home: billingHome) == nil)
+assert(BillingReportReader(home: billingHome).sample().problem == .missingKey)
+try "abc123\n".write(to: keyFile, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyFile.path)
+assert(BillingReportReader.readKey(home: billingHome) == nil, "A group- or world-readable key is refused")
+try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
+assert(BillingReportReader.readKey(home: billingHome) == "abc123")
+try "abc 123".write(to: keyFile, atomically: true, encoding: .utf8)
+try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFile.path)
+assert(BillingReportReader.readKey(home: billingHome) == nil)
+try? FileManager.default.removeItem(at: billingHome)
 if CommandLine.arguments.contains("--live") {
 let meterFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Codex Token Meter/machine-usage-history.json")
 let meterBefore = try Data(contentsOf: meterFile)
@@ -243,4 +282,4 @@ let liveStatus = AIStatusReader.shared.sample(detailed: false)
 assert(!liveStatus.proxyConfigured || liveStatus.proxyReachable, "Configured proxy should answer locally")
 assert(liveStatus.accounts.allSatisfy { $0.windows.allSatisfy { (0...100).contains($0.percent) } })
 }
-print("Token usage checks passed: calendar boundaries, cache accounting, price coverage, schema validation, Claude cache accounting, combined and partial totals, price conversion and category charges, model reconciliation, proxy-routed model attribution, incremental session reads, account quota parsing, and live aggregate reconciliation")
+print("Token usage checks passed: calendar boundaries, cache accounting, price coverage, schema validation, Claude cache accounting, combined and partial totals, price conversion and category charges, model reconciliation, proxy-routed model attribution, incremental session reads, account quota parsing, billing feed decoding and key permissions, and live aggregate reconciliation")
