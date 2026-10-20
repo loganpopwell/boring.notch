@@ -463,11 +463,6 @@ extension Defaults.Keys {
     static let showPowerStatusIcons = Key<Bool>("showPowerStatusIcons", default: true)
     static let showChargingWattage = Key<Bool>("showChargingWattage", default: true)
 
-    // MARK: AI
-    static let showAIQuotaRing = Key<Bool>("showAIQuotaRing", default: true)
-    static let showAIAlerts = Key<Bool>("showAIAlerts", default: true)
-    static let aiRingWarnPercent = Key<Double>("aiRingWarnPercent", default: 75)
-
     // MARK: Downloads
     static let enableDownloadListener = Key<Bool>("enableDownloadListener", default: true)
     static let enableSafariDownloads = Key<Bool>("enableSafariDownloads", default: true)

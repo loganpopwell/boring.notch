@@ -47,7 +47,7 @@ xcrun swiftc Shared/AIStatusSnapshot.swift Shared/TokenUsageSnapshot.swift Borin
 Local build 283 verification: Release compilation and synthetic/live token checks passed. Independent raw-field sums matched Claude message-ID deduplication using identical file snapshots. Installed main/helper checksums, strict signatures, and preferences were verified. Live UI verified model shares, estimated USD, category charges, Claude 1-hour writes, combined pricing chart, and Spark proxy provenance. Home calendar events, Calendar/Reminders lists, and changing Stats readings were verified after installation.
 
 
-## AI limits, quota ring, and alerts
+## AI limits
 
 The XPC helper reads account limits through `AIStatusReader`:
 
@@ -56,10 +56,12 @@ The XPC helper reads account limits through `AIStatusReader`:
 - **Native Codex.** The newest `token_count` rate-limit record in the last three days of `~/.codex/sessions` files. Only those lines are decoded.
 - **Restart.** The helper finds the LaunchAgent whose program is `cliproxyapi` and runs `launchctl kickstart -k`. This clears stalled upstream connections after a network change.
 
-The ring in the closed notch follows the account that most recently answered through the proxy (latest `quota.observed_at`), falling back to the highest-priority usable account, then Codex. It shows that account's tightest window: mint below the warning level (75% by default), orange above it, red at 95% or at the limit, and grey with "!" when the configured proxy is not responding. Music, notifications, and HUDs take its place while showing. It replaces the idle face when enabled.
+Limits are polled only while the Tokens tab is open: every 30 seconds for the overview summary cards, every 45 seconds with full limits while Limits is open. The overview's Claude card follows the account that most recently answered through the proxy while it is still usable, otherwise the highest-priority usable account. Colors are mint below 75%, orange from 75%, and red from 95% or at the limit.
 
-Alerts appear for about five seconds only on changes: the proxy stops responding or comes back, an account reaches a limit, the last-used account switches because the previous one became unusable, or the ring account crosses the warning level. Click to dismiss.
+The closed-notch quota ring, its alerts, and Settings › AI were removed on 2026-10-19 because they were unused; their preference keys are no longer read.
 
-Turn the ring on or off from the **Ring in notch** switch in Tokens › Limits or in Settings › AI, which also has the alert toggle, the warning level, source status, and a restart button.
+## Tokens tab layout
+
+Sections are Overview, Models, Pricing, History, and Limits, with source and maker filters and a Today/This month/Lifetime control below. Every section uses the same content height, so the notch stays at 320 pt while the tab is open. Overview shows tokens, estimated cost, the Claude and Codex limit cards, a stacked bar of new input, cache reads and output, and the top three models. History is a bar chart of the last 12 months; hover a bar for its totals.
 
 Local build 284 verification: synthetic and live token and quota checks passed, Release build succeeded, installed ad-hoc signatures verified with `codesign --verify --deep --strict` using the previous build's app and helper entitlements, and the closed-notch ring rendered. The previous build and preferences were backed up under `~/Library/Application Support/BoringNotch/backups/`.

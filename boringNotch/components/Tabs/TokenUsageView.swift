@@ -56,10 +56,12 @@ struct TokenUsageView: View {
     @EnvironmentObject var vm: BoringViewModel
     @StateObject private var model = TokenUsageModel()
     @State private var selected = "month"
-    @State private var history = false
     @State private var panel = "overview"
     @State private var selectedModelID: String?
     @State private var provider = "all"
+    /// One height for every panel, so switching panels never resizes the notch.
+    private let contentHeight: CGFloat = 186
+    private let sections = [("overview", "Overview"), ("models", "Models"), ("pricing", "Pricing"), ("history", "History"), ("limits", "Limits")]
     private var source: NotchTokenSource? {
         guard let snapshot = model.snapshot else { return nil }
         if provider.hasPrefix("vendor:") { return snapshot.source("all").filtered(vendor: String(provider.dropFirst(7))) }
@@ -71,9 +73,9 @@ struct TokenUsageView: View {
     private var failure: String? { model.failure ?? source?.error }
     private var providerTitle: String {
         if provider.hasPrefix("vendor:") { return NotchTokenModel.vendorTitle(String(provider.dropFirst(7))) + " models" }
-        return provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Codex + Claude"
+        return provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "All tools"
     }
-    private var expanded: Bool { history || panel != "overview" }
+    private var section: String { panel == "detail" ? "models" : panel }
     private var chosenModel: NotchTokenModel? { period?.models.first { $0.id == selectedModelID } }
     private var period: NotchTokenPeriod? { source?.periods.first { $0.id == selected } }
     private var stale: Bool { source.map { Date().timeIntervalSince($0.sampledAt) > 3600 } ?? false }
@@ -94,103 +96,83 @@ struct TokenUsageView: View {
     }
     var body: some View {
         VStack(spacing: 7) {
-            HStack(spacing: 6) {
-                ForEach([("all", "All"), ("codex", "Codex"), ("claude", "Claude Code")] + vendorFilters, id: \.0) { id, title in
-                    if id == vendorFilters.first?.0 { Divider().frame(height: 10) }
-                    Button { provider = id; selectedModelID = nil; if panel == "detail" { panel = "models" } } label: {
-                        Text(title).padding(.horizontal, 9).padding(.vertical, 3)
-                            .background(Capsule().fill(provider == id && panel != "limits" ? Color.white.opacity(0.12) : .clear))
-                    }.buttonStyle(.plain).foregroundStyle(provider == id && panel != "limits" ? .primary : .secondary)
-                        .help(id.hasPrefix("vendor:") ? "Usage of this company's models from every tool" : "Usage logged by this tool")
+            HStack(spacing: 4) {
+                ForEach(sections, id: \.0) { id, title in
+                    pill(title, on: section == id, tint: .cyan) { panel = id; selectedModelID = nil }
                 }
                 Spacer()
-                Button { panel = panel == "limits" ? "overview" : "limits"; history = false; selectedModelID = nil } label: {
-                    Label("Limits", systemImage: "gauge.with.dots.needle.33percent")
-                        .padding(.horizontal, 9).padding(.vertical, 3)
-                        .background(Capsule().fill(panel == "limits" ? Color.white.opacity(0.12) : .clear))
-                }.buttonStyle(.plain).foregroundStyle(panel == "limits" ? .cyan : .secondary)
-                    .help("Subscription limits for each Claude account in CLI Proxy, and Codex")
-            }.font(.system(size: 10))
-            HStack(spacing: 7) {
-                if history {
-                    Button { history = false } label: { Label("Overview", systemImage: "chevron.left") }.buttonStyle(.plain)
-                    Spacer()
-                    Text("Monthly history").fontWeight(.semibold)
-                } else {
-                    ForEach([("today", "Today"), ("month", "This month"), ("lifetime", "Lifetime")], id: \.0) { id, title in
-                        Button { selected = id } label: {
-                            Text(title).padding(.horizontal, 10).padding(.vertical, 4)
-                                .background(Capsule().fill(selected == id ? Color.white.opacity(0.12) : .clear))
-                        }.buttonStyle(.plain).foregroundStyle(selected == id ? .primary : .secondary)
-                    }
-                    Spacer()
-                    Button("Models") { panel = panel == "models" ? "overview" : "models"; selectedModelID = nil }.buttonStyle(.plain)
-                        .foregroundStyle(panel == "models" || panel == "detail" ? .cyan : .secondary)
-                    Button("Pricing") { panel = panel == "pricing" ? "overview" : "pricing"; selectedModelID = nil }.buttonStyle(.plain)
-                        .foregroundStyle(panel == "pricing" ? .cyan : .secondary)
-                    Button { history = true; panel = "overview" } label: { Image(systemName: "calendar") }.buttonStyle(.plain).help("Monthly history").accessibilityLabel("Monthly token history")
+                Button { model.refresh(includeCodex: provider != "claude"); AIStatusModel.shared.refresh() } label: {
+                    if model.loading { ProgressView().controlSize(.mini) } else { Image(systemName: "arrow.clockwise") }
                 }
-                Button { model.refresh(includeCodex: provider != "claude") } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).disabled(model.loading).help("Refresh Codex and Claude usage").accessibilityLabel("Refresh token usage")
+                    .buttonStyle(.plain).frame(width: 16).disabled(model.loading).help("Refresh usage and limits").accessibilityLabel("Refresh token usage")
                 Button(action: openMeter) { Image(systemName: "arrow.up.forward.app") }
                     .buttonStyle(.plain).help("Open AI Token Meter to update history").accessibilityLabel("Open AI Token Meter")
             }.font(.system(size: 11))
-            if panel == "limits" {
-                AILimitsPanel()
-            } else if let failure = failure {
-                VStack(spacing: 8) {
-                    Text(failure).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    if provider != "claude" { Button("Open AI Token Meter", action: openMeter).buttonStyle(.plain) }
-                }.font(.system(size: 12)).frame(maxWidth: .infinity, minHeight: history ? 198 : 70)
-            } else if history, let snapshot = source {
-                ScrollView {
-                    LazyVStack(spacing: 5) {
-                        ForEach(snapshot.months) { month in
-                            HStack {
-                                Text(month.title).fontWeight(.medium)
-                                Spacer()
-                                Text(count(month.tokens) + " tokens").foregroundStyle(.secondary)
-                                Text(cost(month)).foregroundStyle(.cyan).frame(width: 105, alignment: .trailing)
-                                if month.coverage < 1 { Image(systemName: "circle.lefthalf.filled").help("Partially priced") }
-                            }.font(.system(size: 12)).monospacedDigit().padding(9)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .secondarySystemFill)))
-                        }
+            if section != "limits" {
+                HStack(spacing: 3) {
+                    ForEach([("all", "All"), ("codex", "Codex"), ("claude", "Claude Code")] + vendorFilters, id: \.0) { id, title in
+                        if id == vendorFilters.first?.0 { Divider().frame(height: 10).padding(.horizontal, 3) }
+                        pill(title, on: provider == id, tint: .white) { provider = id; selectedModelID = nil; if panel == "detail" { panel = "models" } }
+                            .help(id.hasPrefix("vendor:") ? "Usage of this company's models from every tool" : "Usage logged by this tool")
                     }
-                }.frame(height: 176)
-            } else if panel != "overview", let p = period {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack {
-                        Button { panel = panel == "detail" ? "models" : "overview"; selectedModelID = nil } label: {
-                            Label(panel == "detail" ? "Models" : "Overview", systemImage: "chevron.left")
-                        }.buttonStyle(.plain)
-                        Spacer()
-                        Text(panel == "pricing" ? "Model prices" : panel == "detail" ? "Model details" : "Models · " + p.title).fontWeight(.semibold)
-                    }.font(.system(size: 10))
-                    ScrollView {
-                        if panel == "pricing" { TokenPricingChart(period: p, onSelect: openModel) }
-                        else if panel == "detail", let chosenModel { TokenModelDetail(model: chosenModel, period: p) }
-                        else { TokenModelList(period: p, onSelect: openModel) }
-                    }.frame(height: 161)
-                }
-            } else if let p = period {
-                HStack(spacing: 8) {
-                    metric(providerTitle.uppercased() + " TOKENS", value: count(p.tokens), subtitle: selected == "lifetime" ? (provider == "codex" ? "Recorded history on this Mac" : "Retained history on this Mac") : p.title, accent: false)
-                    metric("API-EQUIVALENT COST", value: cost(p), subtitle: p.coverage < 1 ? String(format: "%.1f%% priced · partial USD estimate", floor(p.coverage * 1000) / 10) : (p.models.contains(where: \.hasProxy) ? "Estimated USD · includes proxy pricing" : "Estimated USD · not your bill"), accent: true)
-                }
-                HStack(spacing: 6) {
-                    tokenPiece("Input", p.input)
-                    tokenPiece("Cached", p.cached)
-                    tokenPiece("Output", p.output)
-                    Spacer(minLength: 0)
-                    if provider == "codex", selected == "lifetime", let account = model.snapshot?.accountLifetimeTokens {
-                        Text("Account: " + count(account)).foregroundStyle(.secondary)
-                            .help("AI Token Meter's separate account lifetime total, as of \(model.snapshot?.accountReadAt?.formatted(date: .abbreviated, time: .shortened) ?? "unknown"). It is not added to local usage or used to estimate cost.")
+                    Spacer()
+                    if section != "history" {
+                        Picker("Period", selection: $selected) {
+                            Text("Today").tag("today"); Text("This month").tag("month"); Text("Lifetime").tag("lifetime")
+                        }.pickerStyle(.segmented).labelsHidden().controlSize(.mini).frame(width: 200)
                     }
-                }.font(.system(size: 10)).lineLimit(1)
-            } else {
-                Text("Reading token history…").font(.system(size: 12)).foregroundStyle(.secondary).frame(height: 80)
+                }.font(.system(size: 10))
             }
-            HStack(spacing: 5) {
+            Group {
+                if section == "limits" {
+                    AILimitsPanel(height: contentHeight)
+                } else if let failure = failure {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle").font(.system(size: 18)).foregroundStyle(.orange)
+                        Text(failure).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        if provider != "claude" { Button("Open AI Token Meter", action: openMeter).buttonStyle(.plain).foregroundStyle(.cyan) }
+                    }.font(.system(size: 12)).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if section == "history", let snapshot = source {
+                    TokenHistoryChart(months: snapshot.months, count: count, cost: cost)
+                } else if let p = period {
+                    switch panel {
+                    case "detail":
+                        VStack(alignment: .leading, spacing: 5) {
+                            Button { panel = "models"; selectedModelID = nil } label: { Label("All models", systemImage: "chevron.left") }
+                                .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
+                            ScrollView { if let chosenModel { TokenModelDetail(model: chosenModel, period: p) } }.scrollIndicators(.never)
+                        }
+                    case "models": ScrollView { TokenModelList(period: p, onSelect: openModel) }.scrollIndicators(.never)
+                    case "pricing": ScrollView { TokenPricingChart(period: p, onSelect: openModel) }.scrollIndicators(.never)
+                    default: overview(p)
+                    }
+                } else {
+                    ProgressView("Reading token history…").controlSize(.small).font(.system(size: 11)).frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }.frame(height: contentHeight, alignment: .top)
+            footer
+        }
+        .padding(.horizontal, 12).frame(width: 600)
+        .onDisappear { if vm.notchState == .open { vm.notchSize.height = openNotchSize.height } }
+        .task {
+            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = 320 }
+            while !Task.isCancelled {
+                model.refresh(includeCodex: provider != "claude")
+                do { try await Task.sleep(for: .seconds(30)) } catch { break }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 5) {
+            if section == "limits" {
+                Circle().fill(.mint).frame(width: 4, height: 4)
+                if let date = AIStatusModel.shared.status?.sampledAt, date > .distantPast {
+                    Text("Updated"); Text(date, style: .relative); Text("ago · CLI Proxy and Codex sessions")
+                } else { Text("CLI Proxy and Codex sessions") }
+                Spacer(minLength: 0)
+                Text("Weekly limits refresh every two minutes while this is open")
+            } else {
                 Circle().fill(stale ? .orange : .mint).frame(width: 4, height: 4)
                 if let date = source?.sampledAt, date > .distantPast {
                     Text(stale ? "Last scan" : "Updated")
@@ -198,34 +180,175 @@ struct TokenUsageView: View {
                     Text(provider == "claude" ? "ago · Local Claude Code" : provider == "codex" ? "ago · AI Token Meter" : "ago · Local sources")
                 } else { Text("Local history · AI Token Meter") }
                 Spacer(minLength: 0)
-                Text(model.lateRefresh ? "Refresh is taking longer · showing last reading" : source?.notice ?? (history ? "USD estimate · partial pricing marked" : (source?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Cached tokens are part of input")))
-            }.font(.system(size: 9)).foregroundStyle(stale || source?.notice != nil ? .orange : .secondary).lineLimit(1)
-        }
-        .padding(.horizontal, 12).frame(width: 600)
-        .onChange(of: expanded) { _, value in
-            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = value ? 320 : max(openNotchSize.height, 210) }
-        }
-        .onDisappear { if vm.notchState == .open { vm.notchSize.height = openNotchSize.height } }
-        .task {
-            withAnimation(.smooth(duration: 0.25)) { vm.notchSize.height = expanded ? 320 : max(openNotchSize.height, 210) }
-            while !Task.isCancelled {
-                model.refresh(includeCodex: provider != "claude")
-                do { try await Task.sleep(for: .seconds(30)) } catch { break }
+                Text(model.lateRefresh ? "Refresh is taking longer · showing last reading" : source?.notice ?? (source?.cacheCountsInconsistent == true ? "Some source cache counts inconsistent" : "Estimates use standard API prices · not your bill"))
             }
         }
+        .font(.system(size: 9)).foregroundStyle(section != "limits" && (stale || source?.notice != nil) ? .orange : .secondary).lineLimit(1)
     }
+
+    @ViewBuilder private func overview(_ p: NotchTokenPeriod) -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 7) {
+                metric(providerTitle.uppercased() + " · TOKENS", value: count(p.tokens),
+                       subtitle: selected == "lifetime" ? lifetimeNote : p.title, accent: false)
+                metric("ESTIMATED COST", value: cost(p),
+                       subtitle: p.coverage < 1 ? String(format: "%.1f%% of tokens priced", floor(p.coverage * 1000) / 10)
+                           : p.models.contains(where: \.hasProxy) ? "Includes proxy pricing" : "At standard API prices",
+                       accent: true)
+                if provider != "codex" && provider != "vendor:openai" { AILimitSummary(provider: "claude") { panel = "limits" } }
+                if provider != "claude" && provider != "vendor:anthropic" { AILimitSummary(provider: "codex") { panel = "limits" } }
+            }.frame(height: 66)
+            composition(p)
+            topModels(p)
+        }
+    }
+
+    private var lifetimeNote: String {
+        if provider == "codex", let account = model.snapshot?.accountLifetimeTokens { return "Account total " + count(account) }
+        return "Retained history on this Mac"
+    }
+
+    /// Where the tokens went: new input, cache reads, and output, as one stacked bar.
+    private func composition(_ p: NotchTokenPeriod) -> some View {
+        let cached = min(p.cached, p.input)
+        let parts: [(String, Int64, Color)] = [("New input", max(0, p.input - cached), .cyan), ("Cache reads", cached, .indigo), ("Output", p.output, .mint)]
+        let total = max(1, parts.reduce(0) { $0 + $1.1 })
+        return VStack(spacing: 5) {
+            GeometryReader { proxy in
+                HStack(spacing: 2) {
+                    ForEach(parts, id: \.0) { part in
+                        if part.1 > 0 {
+                            RoundedRectangle(cornerRadius: 2).fill(part.2.opacity(0.85))
+                                .frame(width: max(3, (proxy.size.width - 4) * CGFloat(part.1) / CGFloat(total)))
+                        }
+                    }
+                }
+            }.frame(height: 6).clipShape(Capsule())
+            HStack(spacing: 14) {
+                ForEach(parts, id: \.0) { part in
+                    HStack(spacing: 4) {
+                        Circle().fill(part.2).frame(width: 5, height: 5)
+                        Text(part.0).foregroundStyle(.secondary)
+                        Text(count(part.1)).monospacedDigit()
+                        Text(String(format: "%.0f%%", Double(part.1) / Double(total) * 100)).foregroundStyle(.secondary).monospacedDigit()
+                    }.help(part.1.formatted() + " tokens")
+                }
+                Spacer(minLength: 0)
+            }.font(.system(size: 10)).lineLimit(1)
+        }
+    }
+
+    private func topModels(_ p: NotchTokenPeriod) -> some View {
+        VStack(spacing: 3) {
+            HStack {
+                Text("TOP MODELS").font(.system(size: 8, weight: .medium)).tracking(0.4).foregroundStyle(.secondary)
+                Spacer()
+                if p.models.count > 3 {
+                    Button("All \(p.models.count) models ›") { panel = "models" }.buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(.cyan)
+                }
+            }
+            ForEach(p.models.prefix(3)) { item in
+                Button { openModel(item) } label: {
+                    HStack(spacing: 8) {
+                        Text(item.name).lineLimit(1).frame(width: 170, alignment: .leading)
+                        AILimitBarShare(fraction: p.tokens > 0 ? Double(item.tokens) / Double(p.tokens) : 0)
+                        Text(String(format: "%.0f%%", p.tokens > 0 ? Double(item.tokens) / Double(p.tokens) * 100 : 0))
+                            .foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+                        Text(count(item.tokens)).frame(width: 58, alignment: .trailing)
+                        Text(item.tokens > 0 && item.pricedTokens == 0 ? "Unpriced" : item.estimatedUSD.formatted(.currency(code: "USD")))
+                            .foregroundStyle(.cyan).frame(width: 72, alignment: .trailing)
+                    }
+                    .font(.system(size: 10)).monospacedDigit()
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .secondarySystemFill).opacity(0.6)))
+                    .contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Details for \(item.name)")
+            }
+            if p.models.isEmpty { Text("No usage recorded for this period.").font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 6) }
+        }
+    }
+
     private func openModel(_ value: NotchTokenModel) { selectedModelID = value.id; panel = "detail" }
-    private func tokenPiece(_ title: String, _ amount: Int64) -> some View {
-        HStack(spacing: 3) { Text(title).foregroundStyle(.secondary); Text(count(amount)).monospacedDigit() }
-            .padding(.trailing, 8).help(amount.formatted() + " " + title.lowercased() + " tokens")
+    private func pill(_ title: String, on: Bool, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).padding(.horizontal, 9).padding(.vertical, 3)
+                .background(Capsule().fill(on ? tint.opacity(tint == .white ? 0.12 : 0.18) : .clear))
+                .contentShape(Capsule())
+        }.buttonStyle(.plain).foregroundStyle(on ? (tint == .white ? Color.primary : tint) : .secondary)
     }
     private func metric(_ title: String, value: String, subtitle: String, accent: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 8, weight: .medium)).tracking(0.4).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 23, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(accent ? Color.cyan : .white).lineLimit(1).minimumScaleFactor(0.7)
+            Text(title).font(.system(size: 8, weight: .medium)).tracking(0.4).foregroundStyle(.secondary).lineLimit(1)
+            Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(accent ? Color.cyan : .white).lineLimit(1).minimumScaleFactor(0.6)
             Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 6)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 11).fill(Color(nsColor: .secondarySystemFill)))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.white.opacity(0.08), lineWidth: 0.7))
+    }
+}
+
+/// A neutral share bar for model rows.
+struct AILimitBarShare: View {
+    var fraction: Double
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(Color.cyan.opacity(0.7)).frame(width: max(3, proxy.size.width * min(1, max(0, fraction))))
+            }
+        }.frame(height: 4)
+    }
+}
+
+/// Monthly totals as bars, newest on the right, with the selected month's numbers above.
+struct TokenHistoryChart: View {
+    let months: [NotchTokenPeriod]
+    let count: (Int64) -> String
+    let cost: (NotchTokenPeriod) -> String
+    @State private var hovered: String?
+    private var shown: [NotchTokenPeriod] { Array(months.prefix(12).reversed()) }
+    private var focus: NotchTokenPeriod? { shown.first { $0.id == hovered } ?? shown.last }
+    /// Month IDs are "yyyy-MM".
+    private func label(_ month: NotchTokenPeriod, long: Bool) -> String {
+        let parser = DateFormatter(); parser.dateFormat = "yyyy-MM"; parser.locale = Locale(identifier: "en_US_POSIX")
+        guard let date = parser.date(from: month.id) else { return month.title }
+        return date.formatted(long ? .dateTime.month(.wide).year() : .dateTime.month(.abbreviated))
+    }
+
+    var body: some View {
+        if shown.isEmpty {
+            Text("No monthly history yet.").font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            let peak = max(1, shown.map(\.tokens).max() ?? 1)
+            VStack(alignment: .leading, spacing: 8) {
+                if let focus {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(label(focus, long: true)).font(.system(size: 12, weight: .semibold))
+                        Text(count(focus.tokens) + " tokens").font(.system(size: 12)).monospacedDigit()
+                        Text(cost(focus)).font(.system(size: 12, weight: .semibold)).foregroundStyle(.cyan).monospacedDigit()
+                        if focus.coverage < 1 {
+                            Text(String(format: "%.0f%% priced", focus.coverage * 100)).font(.system(size: 9)).foregroundStyle(.orange)
+                        }
+                        Spacer()
+                        Text("\(shown.count) months · hover a bar").font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
+                HStack(alignment: .bottom, spacing: 6) {
+                    ForEach(shown) { month in
+                        VStack(spacing: 4) {
+                            Spacer(minLength: 0)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(month.id == focus?.id ? Color.cyan : Color.cyan.opacity(0.35))
+                                .frame(height: max(2, 120 * CGFloat(month.tokens) / CGFloat(peak)))
+                            Text(label(month, long: false)).font(.system(size: 8)).foregroundStyle(month.id == focus?.id ? .primary : .secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                        .onHover { hovered = $0 ? month.id : (hovered == month.id ? nil : hovered) }
+                        .help("\(label(month, long: true)): \(count(month.tokens)) tokens · \(cost(month))")
+                    }
+                }
+            }
+        }
     }
 }

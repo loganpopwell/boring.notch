@@ -30,7 +30,7 @@ AI Token Meter must be installed to refresh Codex source data. Opening Tokens st
 
 The Tokens tab's **Limits** view lists each Claude account pooled by a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) gateway, with 5-hour and weekly usage, reset times, routing priority, cooldowns, and which account answered last or would answer next, plus native Codex limits from its session files. A **Restart** button restarts the proxy's LaunchAgent.
 
-An optional ring in the closed notch shows the tightest limit of the account currently in use, and short alerts report when the proxy stops responding, an account hits a limit, or requests switch accounts. Both can be turned off in Settings › AI or from the Limits view.
+The Tokens overview also shows the tightest limit of the Claude account in use and of Codex next to the token and cost totals. Limits are read only while the Tokens tab is open; nothing runs in the closed notch.
 
 The proxy integration reads the management key from `~/.config/cliproxyapi/management-key` and connects only to `127.0.0.1`. Full account limits are requested only while the Limits view is open.
 

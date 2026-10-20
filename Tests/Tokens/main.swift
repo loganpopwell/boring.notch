@@ -177,9 +177,9 @@ try Data(("""
 """).utf8).write(to: codexDay.appendingPathComponent("rollout-test.jsonl"))
 let codexLimits = AIStatusReader.codexAccount(home: codexHome, now: quotaNow)!
 assert(codexLimits.windows.map(\.id) == ["five_hour", "seven_day"] && codexLimits.windows[1].percent == 15 && codexLimits.state == "ok")
-var ringStatus = NotchAIStatus(proxyConfigured: true, proxyReachable: true, accounts: pooled + [codexLimits])
-ringStatus.lastUsedID = "a1"; assert(ringStatus.ringAccount?.id == "a1")
-ringStatus.lastUsedID = nil; ringStatus.nextID = nil; assert(ringStatus.ringAccount?.provider == "codex", "Without the proxy the ring follows Codex")
+var poolStatus = NotchAIStatus(proxyConfigured: true, proxyReachable: true, accounts: pooled + [codexLimits])
+poolStatus.lastUsedID = "a1"; assert(poolStatus.activeClaude?.id == "a1")
+poolStatus.lastUsedID = nil; poolStatus.nextID = nil; assert(poolStatus.activeClaude == nil, "Codex is never the active Claude account")
 assert(AIStatusReader.launchAgentLabel(home: codexHome) == nil)
 if CommandLine.arguments.contains("--live") {
 let meterFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Codex Token Meter/machine-usage-history.json")

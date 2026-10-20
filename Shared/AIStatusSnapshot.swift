@@ -50,6 +50,6 @@ struct NotchAIStatus: Codable, Equatable {
     var codex: NotchQuotaAccount? { accounts.first { $0.provider == "codex" } }
     var lastUsed: NotchQuotaAccount? { accounts.first { $0.id == lastUsedID } }
     var next: NotchQuotaAccount? { accounts.first { $0.id == nextID } }
-    /// The account the closed-notch ring follows.
-    var ringAccount: NotchQuotaAccount? { lastUsed ?? next ?? codex }
+    /// The Claude account requests are going to now: the last one used while it still works, otherwise the next one.
+    var activeClaude: NotchQuotaAccount? { lastUsed.flatMap { $0.usable ? $0 : nil } ?? next ?? lastUsed }
 }
