@@ -39,6 +39,8 @@ private final class CameraEngineState: @unchecked Sendable {
     var captureSession: AVCaptureSession?
     var activeCameraID: String?
     var shouldRun = false
+    /// One discovery session, reused. Its device list stays current, so rebuilding it is wasted work.
+    var discovery: AVCaptureDevice.DiscoverySession?
     let callbacks = OSAllocatedUnfairLock(initialState: CameraEngineCallbacks())
 }
 
@@ -191,7 +193,7 @@ final class AVCaptureSessionEngine: NSObject, CameraSessionEngine {
     }
 
     private static func publishDevices(state: CameraEngineState) {
-        let devices = discoveredDevices()
+        let devices = discoveredDevices(state: state)
         publish(.devices(devices), state: state)
 
         // A running preview should recover after a camera is unplugged and
@@ -201,14 +203,19 @@ final class AVCaptureSessionEngine: NSObject, CameraSessionEngine {
         }
     }
 
-    private static func discoveredDevices() -> [CameraDevice] {
+    private static func discovery(state: CameraEngineState) -> AVCaptureDevice.DiscoverySession {
+        if let discovery = state.discovery { return discovery }
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.external, .builtInWideAngleCamera],
             mediaType: .video,
             position: .unspecified
         )
+        state.discovery = discovery
+        return discovery
+    }
 
-        return discovery.devices
+    private static func discoveredDevices(state: CameraEngineState) -> [CameraDevice] {
+        discovery(state: state).devices
             .sorted { lhs, rhs in
                 if lhs.deviceType == rhs.deviceType {
                     return lhs.localizedName < rhs.localizedName
@@ -230,12 +237,7 @@ final class AVCaptureSessionEngine: NSObject, CameraSessionEngine {
             return
         }
 
-        let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.external, .builtInWideAngleCamera],
-            mediaType: .video,
-            position: .unspecified
-        )
-        let devices = discovery.devices
+        let devices = discovery(state: state).devices
         guard !devices.isEmpty else {
             publish(.devices([]), state: state)
             return
@@ -353,7 +355,7 @@ final class AVCaptureSessionEngine: NSObject, CameraSessionEngine {
                 session.startRunning()
             }
             if session.isRunning {
-                let camera = Self.discoveredDevices().first(where: { $0.id == state.activeCameraID })
+                let camera = Self.discoveredDevices(state: state).first(where: { $0.id == state.activeCameraID })
                 if let camera {
                     let layer = AVCaptureVideoPreviewLayer(session: session)
                     layer.videoGravity = .resizeAspectFill

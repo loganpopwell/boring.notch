@@ -51,12 +51,14 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
         dateParser.formatOptions.insert(.withFractionalSeconds)
         let plainDateParser = ISO8601DateFormatter()
         var events: [Event] = [], partial = false
+        // Cached events live as long as the helper, so store each model name once.
+        var models: [String: String] = [:]
         let lines = data.split(separator: 10, omittingEmptySubsequences: true)
         for (index, line) in lines.enumerated() {
             do {
-                let header = try decoder.decode(Header.self, from: Data(line))
+                let header = try decoder.decode(Header.self, from: line)
                 guard header.type == "assistant" else { continue }
-                let record = try decoder.decode(Record.self, from: Data(line))
+                let record = try decoder.decode(Record.self, from: line)
                 guard let message = record.message, let raw = message.usage else { continue }
                 guard let timestamp = record.timestamp,
                       let date = dateParser.date(from: timestamp) ?? plainDateParser.date(from: timestamp),
@@ -65,7 +67,10 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
                     partial = true; continue
                 }
                 let usage = try raw.normalized()
-                if usage.total > 0 { events.append(Event(id: id, model: model, date: date, usage: usage)) }
+                guard usage.total > 0 else { continue }
+                let shared = models[model] ?? model
+                models[model] = shared
+                events.append(Event(id: id, model: shared, date: date, usage: usage))
             } catch {
                 // A live writer can leave an unfinished final record. Never cache its partial bytes as usage.
                 if index != lines.count - 1 || data.last == 10 { partial = true }
@@ -109,24 +114,28 @@ final class ClaudeLocalUsageReader: @unchecked Sendable {
         return .init(periods: value.periods, months: value.months, sampledAt: now,
             error: reportDays.isEmpty ? "No local Claude Code usage recorded yet." : nil)
     }
-    /// Parses complete lines from `offset` in bounded chunks, so long sessions never load whole into memory.
+    /// Parses complete lines from `offset` in small chunks, so long sessions never load whole into memory.
     private static func scan(_ file: URL, from offset: Int, to size: Int) throws -> (events: [Event], partial: Bool, end: Int) {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         try handle.seek(toOffset: UInt64(offset))
         var position = offset, carry = Data(), events: [Event] = [], partial = false
-        while position < size {
-            guard let chunk = try handle.read(upToCount: min(32_000_000, size - position)), !chunk.isEmpty else { break }
+        // FileHandle reads are autoreleased and XPC worker threads have no pool until the request
+        // ends, so without a pool per chunk every chunk of every file stays alive for the whole scan.
+        while try autoreleasepool(invoking: { () throws -> Bool in
+            guard position < size,
+                  let chunk = try handle.read(upToCount: min(4_000_000, size - position)), !chunk.isEmpty else { return false }
             position += chunk.count
             carry.append(chunk)
             guard let last = carry.lastIndex(of: 10) else {
                 guard carry.count <= 64_000_000 else { throw TokenUsageReader.InvalidHistory.invalid }
-                continue
+                return true
             }
             let result = parse(carry.prefix(through: last))
             events += result.events; partial = partial || result.partial
             carry = Data(carry.suffix(from: last + 1))
-        }
+            return true
+        }) {}
         // Leave an unfinished final record for the next read instead of counting part of it.
         return (events, partial, position - carry.count)
     }

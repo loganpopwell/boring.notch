@@ -106,7 +106,10 @@ final class CameraModel {
     private func handle(_ event: CameraSessionEvent) {
         switch event {
         case .authorization(let status):
-            authorizationStatus = status
+            let wasAuthorized = authorizationStatus == .authorized
+            if authorizationStatus != status {
+                authorizationStatus = status
+            }
             switch status {
             case .authorized:
                 let shouldStart = startAfterAuthorization
@@ -115,7 +118,11 @@ final class CameraModel {
                     || state == .permissionDenied {
                     state = .stopped
                 }
-                engine.refresh()
+                // engine.refresh() republishes authorization, so refreshing on every
+                // .authorized event loops forever. Only refresh when access is newly granted.
+                if !wasAuthorized {
+                    engine.refresh()
+                }
                 if shouldStart {
                     startSession()
                 }
@@ -128,7 +135,9 @@ final class CameraModel {
             }
 
         case .devices(let cameras):
-            availableCameras = cameras
+            if availableCameras != cameras {
+                availableCameras = cameras
+            }
             if cameras.isEmpty {
                 selectedCameraID = nil
                 previewLayer = nil
