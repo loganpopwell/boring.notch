@@ -16,6 +16,13 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         statsQueue.async { [self] in reply(try? JSONEncoder().encode(statsReader.sample())) }
     }
 
+    @objc func readFanControl(with reply: @escaping (Data?) -> Void) { FanControlBridge.shared.read(reply) }
+    @objc func setFanControl(_ mode: String, level: Double, duration: Double, with reply: @escaping (String?) -> Void) {
+        FanControlBridge.shared.apply(mode, level: level, duration: duration, reply)
+    }
+    @objc func installFanHelper(with reply: @escaping (String?) -> Void) { FanControlBridge.shared.install(reply) }
+    @objc func uninstallFanHelper(with reply: @escaping (String?) -> Void) { FanControlBridge.shared.uninstall(reply) }
+
     private let tokenQueue = DispatchQueue(label: "local.boringnotch.token-usage", qos: .utility)
     @objc func readTokenUsage(with reply: @escaping (Data?) -> Void) {
         tokenQueue.async { reply(try? JSONEncoder().encode(TokenUsageReader().sample())) }

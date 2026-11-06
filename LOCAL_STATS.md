@@ -6,7 +6,7 @@ Tab order is Home, Shelf (file drop), Stats. Home/calendar is preserved. The hea
 
 Stats displays CPU, RAM, GPU, network, startup-volume storage, and battery. Click a card for details. CPU has a 30-sample trace; the footer opens Activity Monitor. Sampling runs on a serial utility queue once per second only while the stats view is visible. Per-app CPU and resident memory use the existing read-only XPC helper, grouped by app bundle. It needs no administrator rights, network requests, or third-party service. Details expand the notch, and returning to Overview restores its compact size. Battery details show CPU activity as context, not measured per-app battery drain.
 
-CPU uses deltas of Mach CPU ticks, normalized across cores. Memory excludes file-backed cache and purgeable pages and includes compressed physical storage, so it can differ slightly from Activity Monitor's snapshot. Network sums active en* Wi-Fi/Ethernet counters and excludes virtual interfaces to avoid counting VPN traffic twice. Interface changes/reset counters are not treated as spikes. GPU reads driver-exposed IOAccelerator utilization and displays unavailable when absent. Storage uses the home volume's capacity and available bytes. Battery uses IOKit power sources; health is raw maximum capacity divided by design capacity, with cycle count where exposed. Thermal state is macOS's qualitative state, not a Celsius temperature. Fan RPM and temperature sensors are not included.
+CPU uses deltas of Mach CPU ticks, normalized across cores. Memory excludes file-backed cache and purgeable pages and includes compressed physical storage, so it can differ slightly from Activity Monitor's snapshot. Network sums active en* Wi-Fi/Ethernet counters and excludes virtual interfaces to avoid counting VPN traffic twice. Interface changes/reset counters are not treated as spikes. GPU reads driver-exposed IOAccelerator utilization and displays unavailable when absent. Storage uses the home volume's capacity and available bytes. Battery uses IOKit power sources; health is raw maximum capacity divided by design capacity, with cycle count where exposed. Thermal state is macOS's qualitative state, not a Celsius temperature. Fan speeds, CPU/GPU temperature and fan control are covered under "Fan control" below.
 
 Build:
 
@@ -69,4 +69,28 @@ Local build 284 verification: synthetic and live token and quota checks passed, 
 ## Billing tab
 
 Added 2026-10-19 (build 285). `BillingView.swift` (Tabs, explicit project reference) renders the dashboard's notch feed; `BillingReportReader.swift` in the helper fetches it, and `Shared/BillingReportSnapshot.swift` holds the decoded model. The feed is `lumacore-dashboard` `src/app/api/internal/billing/notch/route.ts`, built by the same `reportOverview()` as the report page's Overview tab. The key is a random per-device key listed in the dashboard's `BILLING_FEED_TOKENS` (Vercel production, sensitive), stored owner-only at `~/.config/lumacore/notch-billing-key`; `scripts/install-billing-key.sh` manages it. (Vercel sensitive values can't be read back, so the HMAC-derived internal scope keys weren't usable.) The LumaCore Revenue Apple TV app reads the same snapshot from `/api/internal/billing/tv` with its own key. Feed version 1; the reader refuses other versions.
+
+## Fan control
+
+Added 2026-11-05 (build 288). The Stats grid has four columns; the new Temperature and Fans cards both open **Fans & cooling**. It shows each fan's RPM against its range, average CPU and GPU temperature, and the controls:
+
+- **Auto** hands the fans back to macOS. **Manual** shows a speed slider (0–100% of each fan's own min–max), applied when the slider is released. **Max** runs every fan at its maximum until turned off.
+- **Cool down** runs the fans at maximum for 5, 15, 30 or 60 minutes, or until turned off. The card and panel show a countdown, and **Stop** returns to Auto.
+
+Readings come from the SMC through the unsandboxed XPC helper (`SMCFan.swift`, `FanControlBridge.swift`) and need no privileges. Temperatures average the M4 core keys (with M1–M3 and Intel fallbacks), the same keys Stats uses. Writing fan speeds needs root, so `BoringNotchFanHelper/main.swift` is a small launch daemon (`theboringteam.boringnotch.FanHelper`) at `/Library/PrivilegedHelperTools` with its plist in `/Library/LaunchDaemons`. The panel's **Install fan helper** button copies it there from `Contents/Library/LaunchServices` through an administrator prompt; **Remove helper** unloads and deletes it. Bump `FanHelperConstants.version` when the daemon changes so the panel offers a reinstall.
+
+On M1–M4 the daemon sets `Ftst` = 1 so thermalmonitord yields, waits about 3 seconds, then sets `F<n>Md` = 1 and the `F<n>Tg` target; M5 accepts the mode write directly. This sequence and the SMC structures follow Stats (MIT, see THIRD_PARTY_LICENSES). Safety rules in the daemon:
+
+- It accepts connections only from code signed as `theboringteam.boringnotch.BoringNotchXPCHelper` running from `/Applications/boringNotch.app/Contents/XPCServices/`. The app is ad-hoc signed, so this is an identifier-and-path check, not a team check. The worst a local process that fakes it can do is set fans between their own minimum and maximum.
+- Requests are limited to Auto, a 0–1 level inside each fan's range, or Max, either until changed or on a timer of at most 24 hours. There is no fans-off mode.
+- Timers live in the daemon, so control returns to macOS when they end even if BoringNotch has quit. Every 5 seconds it re-applies the target (sleep can drop forced mode), and it abandons a below-max Manual level when macOS reports serious thermal pressure.
+- On start (stale state after a crash, which `KeepAlive` restarts), on SIGTERM (`launchctl bootout`, shutdown) and when idle for a minute with no client it hands the fans back to macOS.
+
+Build the daemon into the app after `xcodebuild` and before signing:
+
+```sh
+scripts/embed-fan-helper.sh build/Build/Products/Release/boringNotch.app
+```
+
+Signing for build 288: frameworks with `codesign --force --deep -s -`, the XPC helper and then the app with the entitlements extracted from the previous installed build (`codesign -d --entitlements :-`), no hardened runtime, then `codesign --verify --deep --strict`. The previous build and preferences are in `~/Library/Application Support/BoringNotch/backups/build-287-*`.
 

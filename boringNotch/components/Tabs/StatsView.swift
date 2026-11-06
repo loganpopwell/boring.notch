@@ -47,9 +47,11 @@ import SwiftUI
 struct StatsView: View {
     @EnvironmentObject var vm: BoringViewModel
     @StateObject private var model = SystemStatsModel()
+    @StateObject private var fans = FanControlModel()
+    @State private var tick = 0
     @State private var selected = "CPU"
     @State private var expanded = false
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
     private var s: SystemStatsSample { model.sample }
     private func bytes(_ value: Double?) -> String {
         guard let value else { return "Unavailable" }
@@ -71,10 +73,25 @@ struct StatsView: View {
         case "Memory": return "\(bytes(s.memoryUsed)) used of \(bytes(s.memoryTotal)) · \(bytes(s.compressed)) compressed"
         case "GPU": return s.gpu == nil ? "GPU utilization is not exposed by this Mac's driver." : "GPU utilization from the graphics driver · Thermal state: \(thermal)"
         case "Network": return "Download \(rate(s.received)) · Upload \(rate(s.sent)) · Active Wi-Fi / Ethernet"
+        case "Fans", "Temperature":
+            let rpm = fans.averageRPM.map { "\(Int($0)) rpm average" } ?? "Reading fans"
+            return "\(rpm) · \(fanModeText) · Thermal state: \(thermal)"
         case "Storage": return "\(bytes(s.diskUsed)) used · \(bytes(s.diskTotal.flatMap { total in s.diskUsed.map { total - $0 } })) free · Startup data volume"
         default: return s.battery == nil ? "No internal battery reading available." : "Battery \(percent(s.battery)) · \(s.charging ? "Charging" : "Not charging") · Thermal state: \(thermal)"
         }
     }
+    private var fanModeText: String {
+        switch fans.state.mode { case .automatic: return "Auto"; case .manual: return "Manual"; case .maximum: return "Max cooling" }
+    }
+    private var fanCaption: String {
+        let state = fans.state
+        if state.mode != .automatic, let until = state.until, until > Date() {
+            let left = Int(until.timeIntervalSinceNow.rounded(.up))
+            return "COOLING · " + (left >= 3600 ? String(format: "%d:%02d:%02d", left / 3600, left / 60 % 60, left % 60) : String(format: "%d:%02d", left / 60, left % 60))
+        }
+        return fans.snapshot?.fans.isEmpty == false ? "RPM · " + fanModeText.uppercased() : "FANS"
+    }
+    private var temperature: Double? { fans.snapshot?.cpuTemperature }
     var body: some View {
         VStack(spacing: 7) {
             if expanded {
@@ -87,6 +104,8 @@ struct StatsView: View {
                 card("Network", icon: "network", value: "↓ " + rate(s.received), caption: "↑ " + rate(s.sent), color: .blue, fraction: nil)
                 card("Storage", icon: "internaldrive", value: s.diskUsed.flatMap { used in s.diskTotal.map { percent(used / $0 * 100) } } ?? "—", caption: "DISK USED", color: .cyan, fraction: s.diskUsed.flatMap { used in s.diskTotal.map { used / $0 } })
                 card("Battery", icon: s.charging ? "battery.100percent.bolt" : "battery.75percent", value: percent(s.battery), caption: s.batteryHealth.map { "HEALTH " + percent($0) } ?? (s.charging ? "CHARGING" : "BATTERY"), color: .cyan, fraction: s.battery.map { $0 / 100 })
+                card("Temperature", icon: "thermometer.medium", value: temperature.map { String(format: "%.0f°", $0) } ?? "—", caption: fans.snapshot?.gpuTemperature.map { String(format: "CPU · GPU %.0f°", $0) } ?? "CPU", color: (temperature ?? 0) >= 90 ? .orange : .cyan, fraction: temperature.map { $0 / 105 })
+                card("Fans", icon: fans.state.mode == .automatic ? "fan" : "snowflake", value: fans.averageRPM.map { $0 >= 1000 ? String(format: "%.1fk", $0 / 1000) : String(Int($0)) } ?? "—", caption: fanCaption, color: fans.state.mode == .automatic ? .cyan : .mint, fraction: fans.speedFraction)
             }
             }
             HStack(spacing: 5) {
@@ -107,6 +126,8 @@ struct StatsView: View {
         .task {
             while !Task.isCancelled {
                 await model.refresh()
+                tick += 1
+                if tick % 2 == 1 || (expanded && ["Fans", "Temperature"].contains(selected)) { fans.read() }
                 if expanded && ["CPU", "Memory", "Battery"].contains(selected) { model.readProcesses() }
                 do { try await Task.sleep(for: .seconds(1)) } catch { break }
             }
@@ -124,10 +145,13 @@ struct StatsView: View {
                 Button { expanded = false } label: { Label("Overview", systemImage: "chevron.left") }
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
-                Text(selected == "Battery" ? "Battery health & active apps" : selected + " details").font(.system(size: 12, weight: .semibold))
+                Text(selected == "Battery" ? "Battery health & active apps" : (["Fans", "Temperature"].contains(selected) ? "Fans & cooling" : selected + " details")).font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Text(selected == "Memory" ? "RESIDENT RAM" : (["CPU", "Battery"].contains(selected) ? "CPU · 100% = 1 CORE" : "LIVE")).font(.system(size: 8)).foregroundStyle(.secondary)
             }
+            if ["Fans", "Temperature"].contains(selected) {
+                FanControlPanel(model: fans).frame(maxHeight: .infinity, alignment: .top)
+            } else {
             if selected == "Battery" {
                 Text("Health \(percent(s.batteryHealth)) · \(s.cycles.map { String($0) } ?? "—") cycles · \(s.charging ? "Charging" : "Not charging")")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.green)
@@ -161,6 +185,7 @@ struct StatsView: View {
                     } else { Text(detail).font(.system(size: 13)); Text("Open Activity Monitor for additional system details.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 }.frame(maxWidth: .infinity, minHeight: 210, alignment: .leading)
             }
+            }
         }.frame(height: 233)
     }
     private func card(_ name: String, icon: String, value: String, caption: String, color: Color, fraction: Double?, chart: Bool = false) -> some View {
@@ -169,6 +194,7 @@ struct StatsView: View {
                 HStack(spacing: 6) {
                     Image(systemName: icon).foregroundStyle(.secondary).font(.system(size: 12))
                     Text(value).font(.system(size: 17, weight: .semibold, design: .rounded)).monospacedDigit().contentTransition(.numericText())
+                        .lineLimit(1).minimumScaleFactor(0.7)
                     Spacer(minLength: 0)
                     if chart {
                         StatsSparkline(values: model.history).stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round)).frame(width: 47, height: 18)
