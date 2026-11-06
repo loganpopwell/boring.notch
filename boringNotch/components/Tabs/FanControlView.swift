@@ -121,6 +121,9 @@ struct FanControlPanel: View {
                 if let busy = model.busy {
                     ProgressView().controlSize(.mini)
                     Text(busy)
+                } else if state.releasePending == true {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("Handing the fans back to macOS… retrying every 2 seconds.")
                 } else if let message = model.message {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text(message)

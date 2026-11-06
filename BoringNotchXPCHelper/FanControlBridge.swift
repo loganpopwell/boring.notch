@@ -101,28 +101,20 @@ final class FanControlBridge: @unchecked Sendable {
             guard FileManager.default.isExecutableFile(atPath: bundledBinary.path) else {
                 return reply("This build does not include the fan helper.")
             }
-            let plist: [String: Any] = [
-                "Label": label,
-                "ProgramArguments": [FanHelperConstants.installedBinary],
-                "MachServices": [label: true],
-                "KeepAlive": ["SuccessfulExit": false],
-                "AssociatedBundleIdentifiers": ["theboringteam.boringnotch"],
-            ]
-            let staged = FileManager.default.temporaryDirectory.appendingPathComponent("\(label).plist")
-            do {
-                let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-                try data.write(to: staged, options: .atomic)
-            } catch { return reply("Could not prepare the helper: \(error.localizedDescription)") }
             let quote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            let plistPath = quote(FanHelperConstants.installedPlist)
+            // bootout sends SIGTERM, and a running helper hands the fans back before exiting.
+            // The launchd job definition comes from the helper itself (--launchd-plist).
             let shell = [
                 "/bin/launchctl bootout system/\(label) >/dev/null 2>&1; /bin/mkdir -p /Library/PrivilegedHelperTools",
                 "/usr/bin/install -o root -g wheel -m 0755 \(quote(bundledBinary.path)) \(quote(FanHelperConstants.installedBinary))",
-                "/usr/bin/install -o root -g wheel -m 0644 \(quote(staged.path)) \(quote(FanHelperConstants.installedPlist))",
-                "/bin/launchctl bootstrap system \(quote(FanHelperConstants.installedPlist))",
+                "\(quote(FanHelperConstants.installedBinary)) --launchd-plist > \(plistPath)",
+                "/usr/sbin/chown root:wheel \(plistPath) && /bin/chmod 0644 \(plistPath)",
+                // bootout returns before the old helper has exited; retry until launchd accepts the job.
+                "{ i=0; until /bin/launchctl bootstrap system \(plistPath) 2>/dev/null; do i=$((i+1)); [ $i -ge 40 ] && exit 1; sleep 0.25; done; }",
             ].joined(separator: " && ")
             connection?.invalidate(); connection = nil; lastState = nil
             let error = runAsAdmin(shell, prompt: "BoringNotch wants to install its fan control helper.")
-            try? FileManager.default.removeItem(at: staged)
             reply(error)
         }
     }

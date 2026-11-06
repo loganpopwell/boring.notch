@@ -20,6 +20,8 @@ struct FanControlState: Codable, Equatable {
     var until: Date?
     /// Set when the helper reverted on its own (timer, heat, or error).
     var note: String?
+    /// True while the helper is still retrying the handback to macOS.
+    var releasePending: Bool?
 }
 
 struct FanControlSnapshot: Codable, Equatable {
@@ -35,10 +37,15 @@ struct FanControlSnapshot: Codable, Equatable {
 enum FanHelperConstants {
     static let label = "theboringteam.boringnotch.FanHelper"
     /// Bump when the helper's behavior or protocol changes so the app offers an update.
-    static let version = "1"
+    static let version = "3"
     static let installedBinary = "/Library/PrivilegedHelperTools/\(label)"
     static let installedPlist = "/Library/LaunchDaemons/\(label).plist"
     /// Only this signed XPC service, living inside the installed app, may drive the fans.
     static let clientIdentifier = "theboringteam.boringnotch.BoringNotchXPCHelper"
     static let clientPathPrefix = "/Applications/boringNotch.app/Contents/XPCServices/"
+    /// Present (root-owned, not writable by others) only while scripts/fan-stress-test.sh runs.
+    /// It lets the stress client connect and enables fault injection. Only root can create it.
+    static let stressFlag = "/Library/PrivilegedHelperTools/\(label).stress-test"
+    static let faultFile = "/Library/PrivilegedHelperTools/\(label).fault"
+    static let stressClientIdentifier = "theboringteam.boringnotch.FanStressTest"
 }

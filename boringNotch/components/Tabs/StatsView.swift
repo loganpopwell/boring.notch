@@ -85,6 +85,7 @@ struct StatsView: View {
     }
     private var fanCaption: String {
         let state = fans.state
+        if state.releasePending == true { return "RETURNING TO AUTO" }
         if state.mode != .automatic, let until = state.until, until > Date() {
             let left = Int(until.timeIntervalSinceNow.rounded(.up))
             return "COOLING · " + (left >= 3600 ? String(format: "%d:%02d:%02d", left / 3600, left / 60 % 60, left % 60) : String(format: "%d:%02d", left / 60, left % 60))

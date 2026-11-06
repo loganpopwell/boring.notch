@@ -128,6 +128,19 @@ enum SMCFan {
         min(4, max(0, Int(smc.number("FNum") ?? 0)))
     }
 
+    /// Fan mode byte values: 0 = automatic, 3 = automatic with the fan parked (macOS sets this
+    /// when it stops the fans), 1 = forced. Anything else is treated as not automatic.
+    static func isAutomatic(_ mode: UInt8) -> Bool { mode == 0 || mode == 3 }
+
+    /// Raw state for logs: Ftst and each fan's mode byte and target.
+    static func describe(_ smc: SMCConnection) -> String {
+        let ftst = smc.read("Ftst")?.bytes.first.map(String.init) ?? "?"
+        let fans = (0..<count(smc)).map { id in
+            "F\(id) mode=\(smc.read(modeKey(smc, id))?.bytes.first.map(String.init) ?? "?") tg=\(smc.number("F\(id)Tg").map { String(Int($0)) } ?? "?") ac=\(smc.number("F\(id)Ac").map { String(Int($0)) } ?? "?")"
+        }
+        return "Ftst=\(ftst) " + fans.joined(separator: " ")
+    }
+
     static func readFans(_ smc: SMCConnection) -> [FanControlFan] {
         (0..<count(smc)).compactMap { id in
             guard let actual = smc.number("F\(id)Ac") else { return nil }
@@ -154,38 +167,46 @@ enum SMCFan {
 
     // MARK: Writes (root only)
 
-    private static func writeRetrying(_ smc: SMCConnection, _ key: String, _ bytes: [UInt8], attempts: Int, delay: UInt32) -> Bool {
+    /// Return true to stop a long retry loop early (a newer request, shutdown, or sleep).
+    typealias Abort = () -> Bool
+
+    private static func writeRetrying(_ smc: SMCConnection, _ key: String, _ bytes: [UInt8], attempts: Int, delay: UInt32, abort: Abort = { false }) -> Bool {
         for attempt in 0..<attempts {
             if smc.write(key, bytes) { return true }
+            if abort() { return false }
             if attempt < attempts - 1 { usleep(delay) }
         }
         return false
     }
 
-    private static func setModeByte(_ smc: SMCConnection, _ id: Int, _ value: UInt8, attempts: Int = 10, delay: UInt32 = 50_000) -> Bool {
+    private static func setModeByte(_ smc: SMCConnection, _ id: Int, _ value: UInt8, attempts: Int = 10, delay: UInt32 = 50_000, abort: Abort = { false }) -> Bool {
         let key = modeKey(smc, id)
         guard var current = smc.read(key)?.bytes, !current.isEmpty else { return false }
         if current[0] == value { return true }
         current[0] = value
-        return writeRetrying(smc, key, current, attempts: attempts, delay: delay)
+        return writeRetrying(smc, key, current, attempts: attempts, delay: delay, abort: abort)
     }
 
     /// Puts a fan in forced (manual) mode. M5 and later accept the mode write directly;
     /// M1–M4 first need `Ftst` = 1 so thermalmonitord yields, which takes a few seconds.
-    static func unlock(_ smc: SMCConnection, _ id: Int) -> Bool {
+    /// Every wait checks `abort` at least every 100 ms.
+    static func unlock(_ smc: SMCConnection, _ id: Int, abort: Abort) -> Bool {
         if smc.read(modeKey(smc, id))?.bytes.first == 1 { return true }
         if setModeByte(smc, id, 1, attempts: 1, delay: 0) { return true }
         guard let ftst = smc.read("Ftst"), !ftst.bytes.isEmpty else { return false }
         if ftst.bytes[0] != 1 {
             var bytes = ftst.bytes; bytes[0] = 1
-            guard writeRetrying(smc, "Ftst", bytes, attempts: 100, delay: 50_000) else { return false }
-            usleep(3_000_000)
-            return setModeByte(smc, id, 1, attempts: 300, delay: 100_000)
+            guard writeRetrying(smc, "Ftst", bytes, attempts: 100, delay: 50_000, abort: abort) else { return false }
+            for _ in 0..<30 {
+                if abort() { return false }
+                usleep(100_000)
+            }
+            return setModeByte(smc, id, 1, attempts: 300, delay: 100_000, abort: abort)
         }
-        return setModeByte(smc, id, 1, attempts: 20, delay: 100_000)
+        return setModeByte(smc, id, 1, attempts: 20, delay: 100_000, abort: abort)
     }
 
-    static func setTarget(_ smc: SMCConnection, _ id: Int, rpm: Double) -> Bool {
+    static func setTarget(_ smc: SMCConnection, _ id: Int, rpm: Double, attempts: Int = 10, abort: Abort = { false }) -> Bool {
         let key = "F\(id)Tg"
         guard let value = smc.read(key) else { return false }
         let bytes: [UInt8]
@@ -198,23 +219,58 @@ enum SMCFan {
             bytes = [UInt8(speed >> 6), UInt8((speed << 2) & 0xff)]
         default: return false
         }
-        return writeRetrying(smc, key, bytes, attempts: 10, delay: 50_000)
+        return writeRetrying(smc, key, bytes, attempts: attempts, delay: 50_000, abort: abort)
     }
 
-    /// Hands every fan back to macOS.
-    @discardableResult static func resetAutomatic(_ smc: SMCConnection) -> Bool {
-        var ok = true
-        for id in 0..<count(smc) where smc.read(modeKey(smc, id))?.bytes.first != 0 {
-            if !setModeByte(smc, id, 0) { ok = false }
+    /// Reads whether macOS owns every fan: each fan's mode byte is automatic (0 or 3) and,
+    /// on Macs that have it, `Ftst` is 0. Returns nil when any of those keys can't be read,
+    /// so an unreadable SMC never counts as handed back.
+    static func macOSInControl(_ smc: SMCConnection, hasFtst: Bool) -> Bool? {
+        guard let fanCount = smc.number("FNum").map(Int.init), (0...9).contains(fanCount) else { return nil }
+        if hasFtst {
+            guard let ftst = smc.read("Ftst")?.bytes.first else { return nil }
+            if ftst != 0 { return false }
         }
-        if var ftst = smc.read("Ftst")?.bytes, !ftst.isEmpty, ftst[0] != 0 {
-            ftst[0] = 0
-            if !writeRetrying(smc, "Ftst", ftst, attempts: 10, delay: 50_000) { ok = false }
+        for id in 0..<fanCount {
+            guard let mode = smc.read(modeKey(smc, id))?.bytes.first else { return nil }
+            if !isAutomatic(mode) { return false }
         }
-        return ok
+        return true
+    }
+
+    /// Hands every fan back to macOS and confirms it by reading the SMC back.
+    /// Each round writes mode 0 for any fan not automatic (never touching a fan macOS has
+    /// parked in mode 3), clears that fan's forced
+    /// target (as Stats does), then sets `Ftst` to 0. Returns true only after a read-back
+    /// shows macOS in control. `skipWrites` exists for fault-injection tests.
+    static func release(_ smc: SMCConnection, hasFtst: Bool, rounds: Int = 20, interval: UInt32 = 250_000,
+                        skipWrites: () -> Bool = { false }) -> Bool {
+        var clearTarget = Set<Int>()
+        for round in 0..<rounds {
+            if !skipWrites() {
+                let fanCount = min(9, max(0, Int(smc.number("FNum") ?? 0)))
+                for id in 0..<fanCount {
+                    let key = modeKey(smc, id)
+                    guard var mode = smc.read(key)?.bytes, !mode.isEmpty, !isAutomatic(mode[0]) else { continue }
+                    clearTarget.insert(id)
+                    mode[0] = 0
+                    _ = writeRetrying(smc, key, mode, attempts: 3, delay: 20_000)
+                }
+                for id in clearTarget where smc.read(modeKey(smc, id))?.bytes.first.map(isAutomatic) == true {
+                    if setTarget(smc, id, rpm: 0, attempts: 3) { clearTarget.remove(id) }
+                }
+                if var ftst = smc.read("Ftst")?.bytes, !ftst.isEmpty, ftst[0] != 0 {
+                    ftst[0] = 0
+                    _ = writeRetrying(smc, "Ftst", ftst, attempts: 3, delay: 20_000)
+                }
+            }
+            if macOSInControl(smc, hasFtst: hasFtst) == true { return true }
+            if round < rounds - 1 { usleep(interval) }
+        }
+        return false
     }
 
     static func needsReset(_ smc: SMCConnection) -> Bool {
-        smc.read("Ftst")?.bytes.first == 1 || (0..<count(smc)).contains { smc.read(modeKey(smc, $0))?.bytes.first == 1 }
+        smc.read("Ftst")?.bytes.first == 1 || (0..<count(smc)).contains { smc.read(modeKey(smc, $0))?.bytes.first.map(isAutomatic) == false }
     }
 }
