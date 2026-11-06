@@ -12,6 +12,11 @@
 	<dict>
 		<key>ServiceType</key>
 		<string>Application</string>
+		<!-- Join the user's login session so the administrator prompt for
+		     installing the fan helper can appear. A separate session has no
+		     UI access and authd refuses the prompt. -->
+		<key>JoinExistingSession</key>
+		<true/>
 	</dict>
 </dict>
 </plist>

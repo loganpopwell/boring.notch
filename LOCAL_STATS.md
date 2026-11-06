@@ -72,12 +72,12 @@ Added 2026-10-19 (build 285). `BillingView.swift` (Tabs, explicit project refere
 
 ## Fan control
 
-Added 2026-11-05 (build 288). The Stats grid has four columns; the new Temperature and Fans cards both open **Fans & cooling**. It shows each fan's RPM against its range, average CPU and GPU temperature, and the controls:
+Added 2026-11-05 (build 288; build 289 fixed the install prompt). The Stats grid has four columns; the new Temperature and Fans cards both open **Fans & cooling**. It shows each fan's RPM against its range, average CPU and GPU temperature, and the controls:
 
 - **Auto** hands the fans back to macOS. **Manual** shows a speed slider (0–100% of each fan's own min–max), applied when the slider is released. **Max** runs every fan at its maximum until turned off.
 - **Cool down** runs the fans at maximum for 5, 15, 30 or 60 minutes, or until turned off. The card and panel show a countdown, and **Stop** returns to Auto.
 
-Readings come from the SMC through the unsandboxed XPC helper (`SMCFan.swift`, `FanControlBridge.swift`) and need no privileges. Temperatures average the M4 core keys (with M1–M3 and Intel fallbacks), the same keys Stats uses. Writing fan speeds needs root, so `BoringNotchFanHelper/main.swift` is a small launch daemon (`theboringteam.boringnotch.FanHelper`) at `/Library/PrivilegedHelperTools` with its plist in `/Library/LaunchDaemons`. The panel's **Install fan helper** button copies it there from `Contents/Library/LaunchServices` through an administrator prompt; **Remove helper** unloads and deletes it. Bump `FanHelperConstants.version` when the daemon changes so the panel offers a reinstall.
+Readings come from the SMC through the unsandboxed XPC helper (`SMCFan.swift`, `FanControlBridge.swift`) and need no privileges. Temperatures average the M4 core keys (with M1–M3 and Intel fallbacks), the same keys Stats uses. Writing fan speeds needs root, so `BoringNotchFanHelper/main.swift` is a small launch daemon (`theboringteam.boringnotch.FanHelper`) at `/Library/PrivilegedHelperTools` with its plist in `/Library/LaunchDaemons`. The panel's **Install fan helper** button copies it there from `Contents/Library/LaunchServices` through an administrator prompt; **Remove helper** unloads and deletes it. The XPC helper's Info.plist sets `JoinExistingSession` so that prompt can appear; without it the service runs in its own security session and authd refuses with "interaction not allowed (session has no ui access)". Bump `FanHelperConstants.version` when the daemon changes so the panel offers a reinstall.
 
 On M1–M4 the daemon sets `Ftst` = 1 so thermalmonitord yields, waits about 3 seconds, then sets `F<n>Md` = 1 and the `F<n>Tg` target; M5 accepts the mode write directly. This sequence and the SMC structures follow Stats (MIT, see THIRD_PARTY_LICENSES). Safety rules in the daemon:
 
