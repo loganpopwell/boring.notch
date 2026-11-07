@@ -67,8 +67,16 @@ final class FanControlBridge: @unchecked Sendable {
 
     func apply(_ mode: String, level: Double, duration: Double, _ reply: @escaping (String?) -> Void) {
         queue.async { [self] in
-            // Taking the fans from macOS can take a few seconds on M1–M4.
-            let result: String?? = call(45) { proxy, done in proxy.apply(mode, level: level, duration: duration, with: done) }
+            // Taking the fans from macOS takes up to ~10 s on M1–M4, and a confirmed handback a few seconds.
+            let send: () -> String?? = { [self] in call(60) { proxy, done in proxy.apply(mode, level: level, duration: duration, with: done) } }
+            let started = Date()
+            var result = send()
+            if result == nil, Date().timeIntervalSince(started) < 3 {
+                // The connection dropped at once: the helper was exiting (idle or restarted). launchd
+                // starts a fresh one on the next message. Every request sets a whole state, so resending is safe.
+                connection?.invalidate(); connection = nil
+                result = send()
+            }
             guard let result else { return reply("The fan helper did not respond.") }
             if result == nil, let mode = FanControlState.Mode(rawValue: mode) {
                 lastState = FanControlState(mode: mode, level: mode == .maximum ? 1 : level,

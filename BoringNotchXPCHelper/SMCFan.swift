@@ -187,24 +187,27 @@ enum SMCFan {
         return writeRetrying(smc, key, current, attempts: attempts, delay: delay, abort: abort)
     }
 
-    /// Puts a fan in forced (manual) mode. M5 and later accept the mode write directly;
-    /// M1–M4 first need `Ftst` = 1 so thermalmonitord yields, which takes a few seconds.
-    /// Every wait checks `abort` at least every 100 ms.
-    static func unlock(_ smc: SMCConnection, _ id: Int, abort: Abort) -> Bool {
-        if smc.read(modeKey(smc, id))?.bytes.first == 1 { return true }
-        if setModeByte(smc, id, 1, attempts: 1, delay: 0) { return true }
+    /// Puts a fan in forced (manual) mode. Macs without `Ftst` (M5 and later) accept the mode
+    /// write directly. On Macs with `Ftst` (M1–M4), `Ftst` = 1 is always set first: a direct mode
+    /// write can succeed there too, but thermalmonitord takes the fan back after about 20 s
+    /// unless `Ftst` is held at 1. The mode write is retried until thermalmonitord yields
+    /// (usually within 3 s). Every wait checks `abort` at least every 100 ms.
+    static func unlock(_ smc: SMCConnection, _ id: Int, hasFtst: Bool, abort: Abort) -> Bool {
+        let mode = smc.read(modeKey(smc, id))?.bytes.first
+        guard hasFtst else {
+            return mode == 1 || setModeByte(smc, id, 1, attempts: 20, delay: 100_000, abort: abort)
+        }
         guard let ftst = smc.read("Ftst"), !ftst.bytes.isEmpty else { return false }
         if ftst.bytes[0] != 1 {
             var bytes = ftst.bytes; bytes[0] = 1
             guard writeRetrying(smc, "Ftst", bytes, attempts: 100, delay: 50_000, abort: abort) else { return false }
-            for _ in 0..<30 {
-                if abort() { return false }
-                usleep(100_000)
-            }
-            return setModeByte(smc, id, 1, attempts: 300, delay: 100_000, abort: abort)
         }
-        return setModeByte(smc, id, 1, attempts: 20, delay: 100_000, abort: abort)
+        if mode == 1 { return true }
+        return setModeByte(smc, id, 1, attempts: 300, delay: 100_000, abort: abort)
     }
+
+    /// Whether `Ftst` reads 1 (only meaningful when the Mac has it).
+    static func ftstHeld(_ smc: SMCConnection) -> Bool { smc.read("Ftst")?.bytes.first == 1 }
 
     static func setTarget(_ smc: SMCConnection, _ id: Int, rpm: Double, attempts: Int = 10, abort: Abort = { false }) -> Bool {
         let key = "F\(id)Tg"

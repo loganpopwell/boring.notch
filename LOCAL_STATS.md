@@ -79,17 +79,27 @@ Added 2026-11-05 (build 288; build 289 fixed the install prompt; build 290 harde
 
 Readings come from the SMC through the unsandboxed XPC helper (`SMCFan.swift`, `FanControlBridge.swift`) and need no privileges. Temperatures average the M4 core keys (with M1–M3 and Intel fallbacks), the same keys Stats uses. Writing fan speeds needs root, so `BoringNotchFanHelper/main.swift` is a small launch daemon (`theboringteam.boringnotch.FanHelper`) at `/Library/PrivilegedHelperTools` with its plist in `/Library/LaunchDaemons`. The panel's **Install fan helper** button copies it there from `Contents/Library/LaunchServices` through an administrator prompt; **Remove helper** unloads and deletes it. The XPC helper's Info.plist sets `JoinExistingSession` so that prompt can appear; without it the service runs in its own security session and authd refuses with "interaction not allowed (session has no ui access)". Bump `FanHelperConstants.version` when the daemon changes so the panel offers a reinstall.
 
-On M1–M4 the daemon sets `Ftst` = 1 so thermalmonitord yields, waits about 3 seconds, then sets `F<n>Md` = 1 and the `F<n>Tg` target; M5 accepts the mode write directly. This sequence and the SMC structures follow Stats (MIT, see THIRD_PARTY_LICENSES).
+On Macs with `Ftst` (M1–M4) the daemon always sets `Ftst` = 1 first, then retries `F<n>Md` = 1 every 100 ms until thermalmonitord yields, then writes the `F<n>Tg` target. Macs without `Ftst` (M5) accept the mode write directly. The SMC structures and the `Ftst` sequence follow Stats (MIT, see THIRD_PARTY_LICENSES). Taking the fans from parked (mode 3) takes 8–10 s on this M4 Pro, so the panel says so while it waits.
 
-### Handing the fans back to macOS (build 291, helper version 3)
+#### How this SMC behaves (measured 2026-11-06, Mac16,7 M4 Pro, macOS 27.0)
+
+The stress test's raw probe (`00`) writes the SMC directly with no daemon involved:
+
+- **Writes land late.** The SMC accepts a write at once but applies it 0.5–3.5 s later, in order. A just-written `Ftst` 0 can read 0, then the older 1, then 0. A takeover write sent just before a handback can land after the handback has read back clean. This caused the original "Stop replied OK, then the fans were forced again" failure.
+- **`Ftst` is required.** From parked fans, a direct `F<n>Md` = 1 without `Ftst` had no effect for 30 s. With `Ftst` = 1, the mode write was accepted after 7.9 s, and the fans then stayed forced at max for the 25 s hold with no change. In run 2, holds without `Ftst` were taken back by macOS after about 20 s.
+- `Ftst` = 1 alone does not force anything. macOS unparks the fans (3 → 0) and keeps writing its own targets.
+
+### Handing the fans back to macOS (build 294, helper version 6)
 
 Fan mode bytes: 0 = automatic, 3 = automatic with the fans parked (macOS sets this when it stops them), 1 = forced. Both 0 and 3 count as macOS in control, and the handback never overwrites a 3.
 
 The handback must never silently fail, so `SMCFan.release` writes mode 0 for each forced fan, clears that fan's forced target (as Stats does), sets `Ftst` to 0, and then **reads the SMC back**. It counts as handed back only when every fan mode byte and `Ftst` read 0; an unreadable key counts as not handed back. It tries 20 rounds 250 ms apart. The daemon keeps a `holding` flag from its first takeover write until a confirmed handback:
 
+- **Late writes.** A handback counts as confirmed only after the SMC has read handed back continuously for 3 s after the handback's own writes, and until 6 s after the daemon's last takeover write. Any relapse (forced mode, `Ftst` 1, or a forced target left on an automatic fan within 10 s of a takeover) is handed back again and restarts the wait. So Stop replies in about 4–6 s after a recent takeover, and the panel shows "Handing the fans back to macOS and confirming…" meanwhile. The "already handed back" shortcut is off within 6 s of a takeover write. After a confirmed handback, the daemon keeps checking every 200 ms for 30 s more.
+- **Crashes with writes in flight.** `/var/run/theboringteam.boringnotch.FanHelper.holding` is created before the first takeover write and removed after a confirmed handback. A daemon that starts and finds it hands back with the full wait, even if the SMC still reads clean, because the dead instance's writes may not have landed yet. Every start also runs the 30-second watch.
 - An unconfirmed handback is retried every 2 seconds, the state reports `releasePending`, and the panel and Fans card show "Returning to Auto" until it succeeds. The daemon will not exit for being idle while `holding`.
 - Every takeover wait checks for interruption at least every 100 ms. A newer request, SIGTERM or system sleep stops a takeover that is still in progress (the M1–M4 unlock can take several seconds) and hands the fans back.
-- SIGTERM (`launchctl bootout`, logout, shutdown) hands back before exit and tries 4 times. If it still can't confirm, it exits with failure so launchd restarts it.
+- SIGTERM (`launchctl bootout`, logout, shutdown) hands back, including the late-write wait, before exit and tries 4 times (`ExitTimeOut` 60). If it still can't confirm, it exits with failure so launchd restarts it.
 - A crash or SIGKILL is covered by launchd: `KeepAlive` (restart unless the exit succeeded), `ThrottleInterval` 2. A new instance hands the fans back on start if any fan or `Ftst` is still forced.
 - System sleep: the daemon holds the sleep (IORegisterForSystemPower) until it has handed the fans back, ending any cool-down ("Mac went to sleep").
 - Timers expire on the daemon's 2-second tick, whether or not BoringNotch is running.
@@ -99,15 +109,15 @@ The daemon logs every takeover and handback, with confirmation time, to the unif
 
 ### Stress test
 
-`scripts/fan-stress-test.sh` (run as yourself; it asks once for an administrator password and takes about 15 minutes) compiles `Tests/FanStress`, reinstalls the helper from `/Applications/boringNotch.app`, and drives the real daemon as root. It checks the SMC directly after every step. While the test runs, a root-owned flag file in `/Library/PrivilegedHelperTools` lets the stress client (signed as `theboringteam.boringnotch.FanStressTest`) connect and enables fault injection. Only root can create the flag, and the script removes it on exit. The tests:
+`scripts/fan-stress-test.sh` (run as yourself; it asks once for an administrator password and takes about 17 minutes) compiles `Tests/FanStress`, reinstalls the helper from `/Applications/boringNotch.app`, and drives the real daemon as root. It starts with the raw SMC probe described above, then checks the SMC directly after every step. "Handed back" means every mode byte automatic, `Ftst` 0, and no forced target left on any fan. After every handback the test samples every 50 ms for 6 s and fails on any relapse, however brief. After a crash or SIGTERM, it waits for the restarted daemon to report a confirmed handback first. While the test runs, a root-owned flag file in `/Library/PrivilegedHelperTools` lets the stress client (signed as `theboringteam.boringnotch.FanStressTest`) connect and enables fault injection. Only root can create the flag, and the script removes it on exit. The tests:
 
-- **Load baseline and final check.** Before any control and again after every other test, it loads all CPU cores and confirms macOS raises the fan target by itself. Mode bytes reading 0 alone would not prove this, because a fan controller nobody runs also leaves the fans at 0.
+- **Proof that macOS drives the fans.** After each test, macOS must write a fan target of its own (not one the test forced) or park the fans. At the end, with every CPU core loaded, macOS must turn the fans on by itself. Mode bytes reading 0 alone would not prove this: a fan controller nobody runs also leaves them at 0, and a late write can leave a forced target behind.
 - **Requests.** Invalid requests are refused. Max then Auto spins the fans up and back down. Manual levels hit their targets. 25 rapid take/release cycles. Stop at five points during a takeover. A storm of 48 overlapping requests from 4 connections.
 - **Timers.** A timed cool-down ends by itself. With no client connected (as if the app quit), the timer still ends and the daemon then exits when idle.
 - **Crashes and shutdown.** SIGKILL while holding (3 times) and mid-takeover (3 times). SIGTERM while holding and mid-takeover. bootout then reload.
 - **Injected failures.** Injected handback write failures, while running and during SIGTERM.
 
-The harness hands the fans back itself (Auto, then direct SMC writes) if it is interrupted or runs over 25 minutes. Thermal-pressure fallback and real system sleep are not exercised by the script.
+The harness hands the fans back itself (Auto, then direct SMC writes) if it is interrupted or runs over 35 minutes. Thermal-pressure fallback and real system sleep are not exercised by the script.
 
 Build the daemon into the app after `xcodebuild` and before signing:
 
@@ -115,15 +125,19 @@ Build the daemon into the app after `xcodebuild` and before signing:
 scripts/embed-fan-helper.sh build/Build/Products/Release/boringNotch.app
 ```
 
-Signing for build 288: frameworks with `codesign --force --deep -s -`, the XPC helper and then the app with the entitlements extracted from the previous installed build (`codesign -d --entitlements :-`), no hardened runtime, then `codesign --verify --deep --strict`. The previous build and preferences are in `~/Library/Application Support/BoringNotch/backups/build-287-*`.
+Signing (since build 288): frameworks with `codesign --force --deep -s -`, the XPC helper and then the app with the entitlements extracted from the previous installed build (`codesign -d --entitlements :-`), no hardened runtime, then `codesign --verify --deep --strict`. The previous build and preferences are in `~/Library/Application Support/BoringNotch/backups/build-287-*`.
 
-### Stress test status (paused 2026-11-06)
+### Stress test status (2026-11-07, build 294, helper version 6)
 
-Run 2 (build 291) was stopped during test 09 at Logan's request. The fans were verified back on macOS afterwards (Ftst 0, both modes 3, helper exited after a confirmed handback). Results so far:
+**Run 5 passed 15/15 with no failed check** (1160 s). Afterwards the fans read `Ftst` 0 with both modes automatic and macOS's own targets, and no holding marker or test flags were left. During that run the daemon caught and fixed 25 late writes or leftover forced targets before confirming those handbacks. Results:
 
-- **Pass.** 01 invalid requests; 02 Max→Auto (macOS wrote the fans 4 ms after the handback); 03 manual levels; 04 25 rapid cycles (slowest confirmed handback 335 ms); 06 request storm. In run 1 (build 290): 09–11 SIGKILL and SIGTERM, while holding and mid-takeover, all handed back within about 1.2 s.
-- **Open.** 05, Stop at 0 s: Stop replied OK in 8 ms, yet 2.5 s later both fans were forced at 5777 rpm. That is a real Stop-then-forced failure and must be explained before this ships. The app sends requests one at a time, but this has not been ruled out for the app.
-- **Open.** 07 and 08: starting from parked fans (mode 3), Max took more than 3 s. During a 30 s cool-down with no client, macOS took the fans back to mode 0 at about 20 s, and the helper did not re-take them. The direct mode write (without Ftst) works on this M4 Pro under macOS 27, but it does not hold. This affects keeping control, not giving it back.
-- **Fixed in 291 after run 1.** Mode 3 was treated as "not handed back". A slow re-take could delay a timer's handback. bootout returning before exit broke an immediate bootstrap.
-- **Not yet run.** 12 bootout, 13–14 injected write failures, 15 final load check. Real sleep and the thermal fallback are not covered by the script.
+- Stop at 0, 0.3, 1, 2.5 and 3.5 s into a takeover: every handback held for the 6 s check; Stop replied in 6–7 s.
+- 25 rapid cycles: no relapse. The slowest confirmed handback took 6.0 s.
+- Cool-downs: the 25 s timer handed back at 26.2 s. With no client connected, a 40 s cool-down stayed forced in all 103 samples and handed back at 42 s, then the daemon exited when idle.
+- Crashes and shutdown: SIGKILL while holding and at 0.2, 1.5 and 3.2 s into a takeover, SIGTERM while holding and mid-takeover, and bootout all ended in a confirmed handback (about 6 s; 0.6 s for bootout) that held.
+- Injected failures: Auto reported the failure, retries confirmed after 12.2 s, and SIGTERM with 60 failed rounds still handed back before exit (25.4 s).
+- At the end, with every core loaded, macOS turned the parked fans on by itself after 227 s.
 
+How we got there (runs 3–5): the raw probe showed the SMC applies writes 0.5–3.5 s late and that holding needs `Ftst`. That led to the quiet-period confirmation, `Ftst`-first takeover, clearing leftover forced targets, the holding marker for crashes, and publishing "returning to Auto" at once. In the app, a request that hits a helper that is exiting is retried once. Test fixes: the takeover allows 15 s, timers count from the request, "handed back" includes no leftover forced target, and crash tests wait for the restarted daemon's confirmation.
+
+**Still not covered by the script:** real system sleep and the thermal-pressure fallback. The panel UI on build 294 has not yet been checked by hand.

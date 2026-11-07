@@ -9,6 +9,16 @@
 //   in-progress takeover within 100 ms and hand the fans back before the daemon exits or
 //   the Mac sleeps. A crash (SIGKILL) is covered by launchd restarting the daemon
 //   (KeepAlive), which hands the fans back on start.
+// - The SMC applies writes late, by up to ~2.5 s (measured on an M4 Pro, macOS 27). A takeover
+//   write sent just before a handback can land after the handback has read back clean, and a
+//   just-written Ftst 0 can read 0, then the old 1, then 0. So a handback only counts as
+//   confirmed once the SMC has read handed back continuously for 3 s after the handback's own
+//   writes and until 6 s after the last takeover write; any relapse is handed back again.
+//   After that, the daemon keeps checking every 200 ms for 30 s more as a backstop.
+// - A marker file in /var/run exists from before the first takeover write until a confirmed
+//   handback. A daemon restarted after a crash that finds it hands back with the full wait,
+//   even if the SMC still reads clean (the crashed instance's writes may not have landed yet).
+//   Every start also runs the 30-second watch.
 // - Below-max manual levels are abandoned when macOS reports serious thermal pressure.
 // Other rules: only the signed BoringNotch XPC helper inside /Applications/boringNotch.app
 // may connect, and requests are limited to automatic, a level inside each fan's own
@@ -29,8 +39,9 @@ let launchdPlist: [String: Any] = [
     // Restart after a crash, so a fresh instance can hand the fans back.
     "KeepAlive": ["SuccessfulExit": false],
     "ThrottleInterval": 2,
-    // Time allowed between SIGTERM and SIGKILL. The handback needs at most ~6 s.
-    "ExitTimeOut": 30,
+    // Time allowed between SIGTERM and SIGKILL. A handback that has to wait out late SMC
+    // writes takes up to ~10 s; the daemon tries up to 4 times.
+    "ExitTimeOut": 60,
     "AssociatedBundleIdentifiers": ["theboringteam.boringnotch"],
 ]
 
@@ -77,6 +88,13 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
     private var connections = 0
     private var lastActivity = Date()
     private var faultRoundsLeft = 0
+    /// Until this time, the SMC is re-checked every 200 ms and any forced fan is handed back again.
+    private var watchUntil = Date.distantPast
+    private var watchTimer: DispatchSourceTimer?
+    /// Last time this daemon wrote anything that takes the fans (mode 1, a target, or Ftst 1).
+    private var lastTakeoverWrite = Date.distantPast
+    /// The forced target last written per fan. A late write can leave it on a fan macOS drives again.
+    private var lastForced: [Int: Double] = [:]
 
     // Readable from any thread.
     private let published = OSAllocatedUnfairLock(initialState: FanControlState())
@@ -100,14 +118,18 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
 
     func start() {
         queue.sync {
-            // A previous instance may have crashed while holding the fans.
-            if SMCFan.needsReset(smc) {
-                log.notice("start: fans were not on macOS control, handing back")
+            // A previous instance may have crashed while holding the fans, possibly with
+            // takeover writes still in flight that the SMC has not applied yet.
+            let marked = FileManager.default.fileExists(atPath: FanHelperConstants.holdingMarker)
+            if marked || SMCFan.needsReset(smc) {
+                log.notice("start: previous instance held the fans (marker: \(marked, privacy: .public)), handing back. SMC: \(SMCFan.describe(self.smc), privacy: .public)")
                 holding = true
+                if marked { lastTakeoverWrite = Date() } // wait out writes that may still land
                 release(note: nil)
             } else {
                 publish()
             }
+            startWatch()
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 2, repeating: 2)
@@ -131,13 +153,19 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
 
     /// Hands the fans back and confirms it. Runs on `queue`. On failure `holding` stays true
     /// and `tick` retries every 2 seconds.
-    @discardableResult private func release(note: String?) -> Bool {
+    /// `quiet: false` skips waiting out late writes; only for a takeover interrupted by a newer
+    /// request, which then either takes the fans itself or hands back with the full wait (the
+    /// shortcut below is off within 6 s of a takeover write).
+    @discardableResult private func release(note: String?, quiet: Bool = true) -> Bool {
         state = FanControlState(mode: .automatic, level: 0, until: nil, note: note)
-        if !holding, SMCFan.macOSInControl(smc, hasFtst: hasFtst) == true {
+        if !holding, Date().timeIntervalSince(lastTakeoverWrite) > 6, SMCFan.macOSInControl(smc, hasFtst: hasFtst) == true {
             publish()
             return true
         }
         holding = true
+        // Show "returning to Auto" right away; confirming can take a few seconds.
+        state.releasePending = true
+        publish()
         if rootOnlyFile(FanHelperConstants.stressFlag), rootOnlyFile(FanHelperConstants.faultFile),
            let text = try? String(contentsOfFile: FanHelperConstants.faultFile, encoding: .utf8), let rounds = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
             try? FileManager.default.removeItem(atPath: FanHelperConstants.faultFile)
@@ -145,21 +173,84 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
             log.notice("fault injection: skipping the next \(self.faultRoundsLeft, privacy: .public) handback write rounds")
         }
         let started = Date()
-        let ok = SMCFan.release(smc, hasFtst: hasFtst, skipWrites: { [self] in
+        let skip: () -> Bool = { [self] in
             guard faultRoundsLeft > 0 else { return false }
             faultRoundsLeft -= 1
             return true
-        })
+        }
+        var ok = SMCFan.release(smc, hasFtst: hasFtst, skipWrites: skip)
+        // Wait out late SMC writes: the read-back must stay handed back for a quiet period.
+        var calmSince = Date(), relapses = 0
+        while ok && quiet {
+            let quietUntil = max(calmSince.addingTimeInterval(3), lastTakeoverWrite.addingTimeInterval(6))
+            if Date() >= quietUntil { break }
+            if Date().timeIntervalSince(started) > 25 { ok = false; break }
+            usleep(100_000)
+            if SMCFan.macOSInControl(smc, hasFtst: hasFtst) != true {
+                relapses += 1
+                log.error("a late SMC write undid the handback; handing back again. SMC: \(SMCFan.describe(self.smc), privacy: .public)")
+                ok = SMCFan.release(smc, hasFtst: hasFtst, skipWrites: skip)
+                calmSince = Date()
+            } else if clearStaleTargets() {
+                relapses += 1
+                calmSince = Date()
+            }
+        }
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         if ok {
             holding = false
-            log.notice("handed fans back to macOS (confirmed in \(ms, privacy: .public) ms); reason: \(note ?? "requested", privacy: .public)")
+            try? FileManager.default.removeItem(atPath: FanHelperConstants.holdingMarker)
+            log.notice("handed fans back to macOS (stable for the quiet period, \(ms, privacy: .public) ms, \(relapses, privacy: .public) late-write relapses); reason: \(note ?? "requested", privacy: .public)")
+            startWatch()
         } else {
             log.error("handback NOT confirmed after \(ms, privacy: .public) ms; retrying. SMC: \(SMCFan.describe(self.smc), privacy: .public)")
         }
         state.releasePending = ok ? nil : true
         publish()
         return ok
+    }
+
+    /// Clears a forced target that a late write left on a fan macOS drives again (mode 0 or 3).
+    /// Late writes land within ~3.5 s, so this only looks within 10 s of the last takeover write;
+    /// after that a matching target is macOS's own and is left alone. Returns true if it found
+    /// one. Runs on `queue`.
+    private func clearStaleTargets() -> Bool {
+        guard Date().timeIntervalSince(lastTakeoverWrite) < 10 else { return false }
+        var found = false
+        for (id, rpm) in lastForced {
+            guard let mode = smc.read(SMCFan.modeKey(smc, id))?.bytes.first, SMCFan.isAutomatic(mode),
+                  let target = smc.number("F\(id)Tg"), abs(target - rpm) < 1 else { continue }
+            found = true
+            log.error("fan \(id + 1, privacy: .public) still had the forced target \(Int(rpm), privacy: .public) rpm after the handback; clearing it")
+            _ = SMCFan.setTarget(smc, id, rpm: 0, attempts: 3)
+        }
+        return found
+    }
+
+    /// Re-checks the SMC every 200 ms for 30 s after a handback. Runs on `queue`.
+    private func startWatch() {
+        watchUntil = Date().addingTimeInterval(30)
+        guard watchTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.2, repeating: 0.2)
+        timer.setEventHandler { [weak self] in self?.watch() }
+        timer.resume()
+        watchTimer = timer
+    }
+
+    private func watch() {
+        if Date() >= watchUntil || state.mode != .automatic {
+            watchTimer?.cancel(); watchTimer = nil
+            return
+        }
+        if stopping.isSet || sleeping.isSet || holding { return }
+        if SMCFan.macOSInControl(smc, hasFtst: hasFtst) == false {
+            log.error("fans read forced after a confirmed handback; handing back again. SMC: \(SMCFan.describe(self.smc), privacy: .public)")
+            holding = true
+            release(note: state.note)
+        } else {
+            _ = clearStaleTargets()
+        }
     }
 
     /// Runs every 2 seconds on `queue`.
@@ -182,7 +273,7 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
             }
         } else if holding {
             release(note: state.note)
-        } else if connections == 0, Date().timeIntervalSince(lastActivity) > 60 {
+        } else if connections == 0, Date().timeIntervalSince(lastActivity) > 60, watchTimer == nil {
             log.notice("idle with fans on macOS control, exiting")
             exit(0) // launchd starts the daemon again on the next request.
         }
@@ -206,13 +297,22 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
         }
         let fans = SMCFan.readFans(smc)
         guard !fans.isEmpty else { return "This Mac reports no controllable fans." }
+        // Without Ftst held at 1, thermalmonitord takes the fans back after about 20 s.
+        let ftstOK = !hasFtst || SMCFan.ftstHeld(smc)
         for fan in fans where fan.maximum > 0 {
             let rpm = targetRPM(for: fan)
-            if fan.manual, let target = fan.target, abs(target - rpm) < 1 { continue }
+            if ftstOK, fan.manual, let target = fan.target, abs(target - rpm) < 1 { continue }
+            // Record before writing anything, so a crash at any point leads to a full handback.
+            if !FileManager.default.fileExists(atPath: FanHelperConstants.holdingMarker) {
+                FileManager.default.createFile(atPath: FanHelperConstants.holdingMarker, contents: nil, attributes: [.posixPermissions: 0o600])
+            }
             holding = true
-            guard SMCFan.unlock(smc, fan.id, abort: abort) else {
+            lastTakeoverWrite = Date()
+            defer { lastTakeoverWrite = Date() }
+            guard SMCFan.unlock(smc, fan.id, hasFtst: hasFtst, abort: abort) else {
                 return abort() ? "Interrupted." : "macOS did not hand over fan \(fan.id + 1)."
             }
+            lastForced[fan.id] = rpm
             guard SMCFan.setTarget(smc, fan.id, rpm: rpm, abort: abort) else {
                 return abort() ? "Interrupted." : "Could not set fan \(fan.id + 1) speed."
             }
@@ -300,7 +400,7 @@ final class FanService: NSObject, BoringNotchFanHelperProtocol, NSXPCListenerDel
                 }
                 if error == "Interrupted." {
                     // A newer request or shutdown is queued behind us; make sure nothing stays forced meanwhile.
-                    release(note: nil)
+                    release(note: nil, quiet: generation.current == request)
                     return reply("Replaced by a newer request.")
                 }
                 release(note: error)

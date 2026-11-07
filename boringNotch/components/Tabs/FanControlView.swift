@@ -60,7 +60,7 @@ import SwiftUI
     }
 
     func set(_ mode: FanControlState.Mode, level: Double = 0, duration: TimeInterval = 0) {
-        let label = mode == .automatic ? "Handing fans back to macOS…" : "Taking control of the fans…"
+        let label = mode == .automatic ? "Handing fans back to macOS and confirming…" : "Taking control of the fans (can take 10 seconds)…"
         run(label) { proxy, done in proxy.setFanControl(mode.rawValue, level: level, duration: duration, with: done) }
     }
     func install() { run("Waiting for your password…") { proxy, done in proxy.installFanHelper(with: done) } }
@@ -123,7 +123,7 @@ struct FanControlPanel: View {
                     Text(busy)
                 } else if state.releasePending == true {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("Handing the fans back to macOS… retrying every 2 seconds.")
+                    Text("Handing the fans back to macOS and confirming…")
                 } else if let message = model.message {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text(message)

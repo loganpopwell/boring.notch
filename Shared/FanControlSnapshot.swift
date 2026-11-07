@@ -37,7 +37,7 @@ struct FanControlSnapshot: Codable, Equatable {
 enum FanHelperConstants {
     static let label = "theboringteam.boringnotch.FanHelper"
     /// Bump when the helper's behavior or protocol changes so the app offers an update.
-    static let version = "3"
+    static let version = "6"
     static let installedBinary = "/Library/PrivilegedHelperTools/\(label)"
     static let installedPlist = "/Library/LaunchDaemons/\(label).plist"
     /// Only this signed XPC service, living inside the installed app, may drive the fans.
@@ -47,5 +47,8 @@ enum FanHelperConstants {
     /// It lets the stress client connect and enables fault injection. Only root can create it.
     static let stressFlag = "/Library/PrivilegedHelperTools/\(label).stress-test"
     static let faultFile = "/Library/PrivilegedHelperTools/\(label).fault"
+    /// Exists from before the daemon's first takeover write until a confirmed handback, so a
+    /// restarted daemon knows late SMC writes may still land. /var/run is cleared at boot.
+    static let holdingMarker = "/var/run/\(label).holding"
     static let stressClientIdentifier = "theboringteam.boringnotch.FanStressTest"
 }
